@@ -1,0 +1,13 @@
+[Unit]
+Description=DSH Web Supervisor — auto-rollback for dsh web crashes
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.nvm/versions/node/v24.19.0/bin/node %h/Work/htdocs/maestro-harness/packages/dsh-maestro-supervisor/lib/index.js daemon
+Restart=always
+RestartSec=2
+Environment=DSH_HOME=%h/.dsh
+
+[Install]
+WantedBy=default.target
