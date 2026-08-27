@@ -121,7 +121,18 @@ Commands:
         const src = path.join(lkgRoot, target)
         for (const entry of fs.readdirSync(src)) {
           if (entry === 'manifest.json') continue
-          fs.cpSync(path.join(src, entry), path.join(dshHome, entry), { recursive: true, force: true })
+          const srcPath = path.join(src, entry)
+          const destPath = path.join(dshHome, entry)
+          try {
+            // Skip if src and dest are the same file (e.g. symlink to same target like ~/.dsh/AGENTS.md)
+            try {
+              if (fs.existsSync(srcPath) && fs.existsSync(destPath) && fs.realpathSync(srcPath) === fs.realpathSync(destPath)) continue
+            } catch {}
+            fs.cpSync(srcPath, destPath, { recursive: true, force: true })
+          } catch (e: any) {
+            if (String(e?.message ?? '').includes('cannot be the same')) continue
+            throw e
+          }
         }
         console.log(`[supervisor] rolled back to ${target}${failingPlugin ? ` (avoiding ${failingPlugin})` : ''}`)
         // Reconcile node_modules from restored package.json (critical for link: deps)
