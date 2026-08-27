@@ -15,11 +15,16 @@ export interface PollHealthOpts {
 
 const ERROR_PATTERNS = [
   'ERR_MODULE_NOT_FOUND',
+  'ERR_PNPM',
   'assertChannel',
   'unhandledRejection',
   'SyntaxError',
+  'YAMLParseError',
+  'ParseError',
+  'YAML',
   'JSON',
   'corrupted',
+  'allowBuilds',
   'Cannot find module',
   'Failed to load',
 ]
@@ -50,10 +55,11 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   }
 
   let logError: string | undefined
+  const lowerLog = logContent.toLowerCase()
   for (const pat of ERROR_PATTERNS) {
-    if (logContent.includes(pat)) {
-      // extract line containing pattern
-      const line = logContent.split('\n').find(l => l.includes(pat)) ?? pat
+    if (lowerLog.includes(pat.toLowerCase())) {
+      // extract line containing pattern (case-insensitive)
+      const line = logContent.split('\n').find(l => l.toLowerCase().includes(pat.toLowerCase())) ?? pat
       logError = line.trim().slice(0, 500)
       break
     }
