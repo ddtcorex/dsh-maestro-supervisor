@@ -9,6 +9,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import { findInterrupted as defaultFindInterrupted } from './resume.js'
 
 export const inject = ['sessions', 'connection'] as const
 
@@ -93,6 +94,33 @@ function getResumeWithinMs(): number {
     }
   } catch {}
   return 5 * 60 * 1000
+}
+
+export async function runAutoResume(
+  ctx: any,
+  opts: {
+    findInterrupted?: typeof defaultFindInterrupted
+    resumeInterrupted?: typeof resumeInterrupted
+  } = {}
+): Promise<void> {
+  const doFind = opts.findInterrupted ?? defaultFindInterrupted
+  const doResume = opts.resumeInterrupted ?? resumeInterrupted
+  try {
+    if (!getAutoResumeEnabled()) {
+      ctx.logger?.info?.('[supervisor] auto-resume disabled — skip')
+      return
+    }
+    const withinMs = getResumeWithinMs()
+    const { scanned, interrupted } = await doFind(undefined, { withinMs })
+    if (!interrupted.length) {
+      ctx.logger?.info?.(`[supervisor] auto-resume: 0/${scanned} interrupted within ${withinMs}ms — nothing to do`)
+      return
+    }
+    ctx.logger?.info?.(`[supervisor] auto-resume: ${interrupted.length}/${scanned} interrupted within ${withinMs}ms: ${interrupted.slice(0, 3).join(', ')}`)
+    await doResume(ctx, interrupted)
+  } catch (e: any) {
+    ctx.logger?.warn?.(`[supervisor] auto-resume error: ${e?.message ?? String(e)}`)
+  }
 }
 
 async function findInterrupted(dshHome?: string, opts?: { withinMs?: number }): Promise<{ scanned: number; interrupted: string[] }> {
