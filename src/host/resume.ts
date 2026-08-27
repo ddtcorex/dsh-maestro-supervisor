@@ -32,6 +32,20 @@ export async function findInterrupted(dshHome?: string, opts?: FindInterruptedOp
         const zstdPath = path.join(groupPath, s.name, 'session.jsonl.zstd')
         const jsonlPath = path.join(groupPath, s.name, 'session.jsonl')
         try {
+          // Cheap pre-filter before any (potentially expensive) decompression: a
+          // session log's mtime only advances when something is appended to it,
+          // so a file older than the requested cutoff cannot contain a turn/end
+          // event within the window. Only applies when a window was requested —
+          // an unfiltered scan (sinceMs === undefined) must still see everything.
+          if (sinceMs !== undefined) {
+            try {
+              const statPath = fs.existsSync(zstdPath) ? zstdPath : (fs.existsSync(jsonlPath) ? jsonlPath : undefined)
+              if (statPath) {
+                const mtimeMs = fs.statSync(statPath).mtimeMs
+                if (mtimeMs < sinceMs) continue
+              }
+            } catch {}
+          }
           let lines: string[] = []
           if (fs.existsSync(zstdPath)) {
             const { execSync } = await import('node:child_process')
