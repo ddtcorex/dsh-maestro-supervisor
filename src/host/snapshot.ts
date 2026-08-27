@@ -29,6 +29,7 @@ export async function writeLKG(dshHome: string, lkgRoot: string): Promise<{ ts: 
   if (fs.existsSync(dshHome)) {
     // Use cpSync if available
     for (const entry of fs.readdirSync(dshHome)) {
+      if (entry === '.supervisor') continue;
       const src = path.join(dshHome, entry)
       const dst = path.join(dest, entry)
       fs.cpSync(src, dst, { recursive: true })
