@@ -155,6 +155,48 @@ async function findInterrupted(dshHome?: string, opts?: { withinMs?: number }): 
   return { scanned, interrupted }
 }
 
+export async function resumeInterrupted(ctx: any, ids: string[]): Promise<void> {
+  for (const id of ids) {
+    try {
+      const sessionId = id.split('/').pop()!
+      const exists = ctx.sessions?.get?.(sessionId)
+      if (exists) {
+        ctx.logger?.info?.(`[supervisor] auto-resume skip ${id} — already live`)
+        continue
+      }
+      const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
+      if (persistence?.load) {
+        try {
+          const loaded = await persistence.load(sessionId)
+          if (loaded?.events?.length) {
+            try {
+              const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
+              const sid = SessionId ? SessionId(sessionId) : sessionId
+              const created = ctx.sessions?.create?.(sid, { seed: loaded.events, meta: loaded.meta ?? {} })
+              if (created) ctx.logger?.info?.(`[supervisor] auto-resume: re-created session ${id} with ${loaded.events.length} events`)
+              try {
+                const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
+                if (agents?.create && loaded.meta?.preset) {
+                  await agents.create({ sessionId: sid, preset: loaded.meta.preset }).catch(() => {})
+                  ctx.logger?.info?.(`[supervisor] auto-resume: agent re-attached for ${id}`)
+                }
+              } catch {}
+            } catch (e: any) {
+              ctx.logger?.info?.(`[supervisor] auto-resume: session ${id} has ${loaded.events.length} events, would resume (create failed: ${e?.message ?? String(e)})`)
+            }
+          }
+        } catch (e: any) {
+          ctx.logger?.warn?.(`[supervisor] auto-resume load failed ${id}: ${e?.message ?? String(e)}`)
+        }
+      } else {
+        ctx.logger?.info?.(`[supervisor] auto-resume: ${id} — no sessionPersistence, skip in-process resume (daemon will notify)`)
+      }
+    } catch (e: any) {
+      ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
+    }
+  }
+}
+
 export function apply(ctx: any, _config: SupervisorPluginConfig = {}): void {
   // Auto-resume after DSH web is ready — runs inside the host, not the daemon.
   ctx.effect(() => {
