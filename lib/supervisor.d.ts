@@ -13,6 +13,8 @@ export interface SupervisorDeps {
         ts: string;
         health: HealthState;
         action: string;
+        logTail?: string;
+        gitDiff?: string;
     }) => Promise<string>;
     rollback: (ts?: string) => Promise<void>;
     notify: (msg: string) => Promise<void>;
@@ -41,6 +43,7 @@ export declare class Supervisor {
     constructor(deps: SupervisorDeps);
     private getRunDebugAgent;
     private getFindInterrupted;
+    private collectGitDiff;
     private handleDebugResult;
     tick(): Promise<void>;
     start(): void;

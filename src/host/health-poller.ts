@@ -3,6 +3,7 @@ export interface HealthState {
   httpCode?: number
   error?: string
   degraded?: boolean
+  logTail?: string
 }
 
 export interface PollHealthOpts {
@@ -72,6 +73,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
       httpCode,
       error: logError ? `${fetchError} + ${logError}` : fetchError,
       degraded: false,
+      logTail: logContent.slice(-5000),
     }
   }
   if (logError) {
@@ -82,6 +84,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
         httpCode,
         error: logError,
         degraded: true,
+        logTail: logContent.slice(-5000),
       }
     }
     return {
@@ -89,6 +92,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
       httpCode,
       error: logError,
       degraded: false,
+      logTail: logContent.slice(-5000),
     }
   }
 
@@ -102,7 +106,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     // ignore
   }
 
-  return { up: httpCode === 200, httpCode }
+  return { up: httpCode === 200, httpCode, logTail: logContent.slice(-5000) }
 }
 
 function defaultFetch(url: string, timeoutMs: number): () => Promise<{ status: number; text: () => Promise<string> }> {
@@ -129,19 +133,43 @@ async function defaultPsAlive(): Promise<boolean> {
   }
 }
 
-async function defaultLogTail(): Promise<string> {
+export async function collectLogTail(): Promise<string> {
   try {
-    const { readFileSync } = await import('node:fs')
+    const { readFileSync, existsSync, statSync } = await import('node:fs')
     const { homedir } = await import('node:os')
-    const candidates = [`${homedir()}/.dsh/dsh-web.log`, `${homedir()}/.dsh.log`]
+    const candidates = [
+      `${homedir()}/.dsh/dsh-web.log`,
+      `${homedir()}/.dsh/.supervisor/supervisor.log`,
+      `${homedir()}/.dsh.log`,
+    ]
     for (const logPath of candidates) {
       try {
+        if (!existsSync(logPath)) continue
+        // avoid reading huge files fully — if >1MB, read tail via shell
+        try {
+          const sz = statSync(logPath).size
+          if (sz > 1024 * 1024) {
+            const { execSync } = await import('node:child_process')
+            const out = execSync(`tail -c 5000 ${JSON.stringify(logPath)} 2>/dev/null || cat ${JSON.stringify(logPath)} 2>/dev/null | tail -c 5000`, { encoding: 'utf-8', timeout: 2000 })
+            if (out) return out.slice(-5000)
+          }
+        } catch {}
         const content = readFileSync(logPath, 'utf-8')
-        if (content) return content.slice(-5000)
+        if (content && content.trim()) return content.slice(-5000)
       } catch {}
     }
+    // fallback: try journalctl for the dsh-web or supervisor units (if running via systemd)
+    try {
+      const { execSync } = await import('node:child_process')
+      const journal = execSync('journalctl --user -u dsh-web-supervisor --no-pager -n 100 2>/dev/null | tail -c 5000 || journalctl --user --no-pager -n 100 2>/dev/null | tail -c 5000 || true', { encoding: 'utf-8', timeout: 2000 })
+      if (journal && journal.trim()) return journal.slice(-5000)
+    } catch {}
     return ''
   } catch {
     return ''
   }
+}
+
+async function defaultLogTail(): Promise<string> {
+  return collectLogTail()
 }
