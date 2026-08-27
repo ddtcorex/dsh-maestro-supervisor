@@ -132,4 +132,27 @@ describe('apply', () => {
     expect(typeof disposer).toBe('function')
     expect(() => disposer()).not.toThrow()
   })
+
+  it('does not throw when ctx.effect itself throws', () => {
+    const ctx = makeCtxWithEffect({
+      effect: () => { throw new Error('effect boom') },
+    })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('does not throw when ctx.effect is missing entirely', () => {
+    const ctx = makeCtxWithEffect({ effect: undefined })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('does not throw when ctx.connection.rpc.handle throws AND the logger.warn used to report it also throws', () => {
+    const ctx = makeCtxWithEffect({
+      connection: { rpc: { handle: () => { throw new Error('bad channel') } } },
+      logger: {
+        info: () => {},
+        warn: () => { throw new Error('logger boom') },
+      },
+    })
+    expect(() => apply(ctx)).not.toThrow()
+  })
 })

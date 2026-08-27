@@ -168,40 +168,52 @@ export async function resumeInterrupted(ctx: any, ids: string[]): Promise<void> 
 }
 
 export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
-  ctx.effect(() => {
-    let disposed = false
-    let timer: ReturnType<typeof setTimeout> | null = null
+  // The whole body is wrapped: per AGENTS.md, apply() must never throw
+  // synchronously or let a rejected promise escape, no matter what fails
+  // (ctx.effect missing/throwing, RPC registration throwing, or even the
+  // error-reporting logger call itself throwing).
+  try {
+    ctx.effect(() => {
+      let disposed = false
+      let timer: ReturnType<typeof setTimeout> | null = null
 
-    timer = setTimeout(() => {
-      if (disposed) return
-      runAutoResume(ctx).catch(() => {
-        // runAutoResume already never rejects, but guard the .catch itself is a no-op safety net
-      })
-    }, 8000)
+      timer = setTimeout(() => {
+        if (disposed) return
+        runAutoResume(ctx).catch(() => {
+          // runAutoResume already never rejects, but guard the .catch itself is a no-op safety net
+        })
+      }, 8000)
 
-    let disposeRpc: (() => void) | undefined
+      let disposeRpc: (() => void) | undefined
+      try {
+        const conn = ctx.connection ?? ctx.get?.('connection')
+        if (conn?.rpc?.handle) {
+          disposeRpc = conn.rpc.handle(
+            '/dsh-maestro-supervisor-resume',
+            async (_endpoint: string, payload: any) => {
+              const within = payload?.withinMs ?? getResumeWithinMs()
+              return await defaultFindInterrupted(undefined, { withinMs: within })
+            },
+            { authority: 'loopback' }
+          )
+        }
+      } catch (e: any) {
+        try {
+          ctx.logger?.warn?.(`[supervisor] auto-resume RPC registration failed: ${e?.message ?? String(e)}`)
+        } catch {}
+      }
+
+      return () => {
+        disposed = true
+        if (timer) clearTimeout(timer)
+        if (disposeRpc) {
+          try { disposeRpc() } catch {}
+        }
+      }
+    }, 'supervisor:auto-resume')
+  } catch (e: any) {
     try {
-      const conn = ctx.connection ?? ctx.get?.('connection')
-      if (conn?.rpc?.handle) {
-        disposeRpc = conn.rpc.handle(
-          '/dsh-maestro-supervisor-resume',
-          async (_endpoint: string, payload: any) => {
-            const within = payload?.withinMs ?? getResumeWithinMs()
-            return await defaultFindInterrupted(undefined, { withinMs: within })
-          },
-          { authority: 'loopback' }
-        )
-      }
-    } catch (e: any) {
-      ctx.logger?.warn?.(`[supervisor] auto-resume RPC registration failed: ${e?.message ?? String(e)}`)
-    }
-
-    return () => {
-      disposed = true
-      if (timer) clearTimeout(timer)
-      if (disposeRpc) {
-        try { disposeRpc() } catch {}
-      }
-    }
-  }, 'supervisor:auto-resume')
+      ctx.logger?.warn?.(`[supervisor] auto-resume apply() failed: ${e?.message ?? String(e)}`)
+    } catch {}
+  }
 }
