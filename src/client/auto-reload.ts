@@ -36,12 +36,13 @@ export function apply(ctx: any): void {
 
       const onOffline = () => startPolling()
       const onOnline = () => {
+        const wasPolling = !!timer
         stopPolling()
-        void checkAndReload()
+        if (wasPolling) void checkAndReload()
       }
 
-      // DSH Web uses WebSocket for sessions; a close means the server went down.
-      // We hook the global WebSocket to detect closes without polling constantly.
+      // DSH Web uses WebSocket for sessions; a close does NOT necessarily mean server down
+      // (normal session end also closes WS). Only start polling if HEAD fetch actually fails.
       const OriginalWebSocket = (window as any).WebSocket
       let wsCloseHandler: (() => void) | null = null
       try {
@@ -49,11 +50,14 @@ export function apply(ctx: any): void {
           const Patched = function (this: any, url: string, protocols?: string | string[]) {
             const ws = protocols ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url)
             ws.addEventListener('close', () => {
-              // Only treat DSH WebSocket closes (same origin) as server-down
               try {
                 const u = new URL(url, window.location.href)
-                if (u.host === window.location.host) startPolling()
-              } catch { startPolling() }
+                if (u.host !== window.location.host) return
+              } catch { /* ignore */ }
+              // Verify server is actually down before polling — avoid reload on normal WS close
+              fetch('/', { method: 'HEAD', cache: 'no-store' }).then(res => {
+                if (!res.ok) startPolling()
+              }).catch(() => startPolling())
             })
             ws.addEventListener('open', () => {
               // If we were polling and WS reopens, check immediately
@@ -71,7 +75,7 @@ export function apply(ctx: any): void {
       window.addEventListener('offline', onOffline)
       window.addEventListener('online', onOnline)
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') void checkAndReload()
+        if (document.visibilityState === 'visible' && timer) void checkAndReload()
       })
 
       // Host push: POST /dsh-maestro-supervisor-reload/reload (loopback) -> reload
