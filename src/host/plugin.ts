@@ -164,7 +164,23 @@ export async function resumeInterrupted(ctx: any, ids: string[]): Promise<string
       if (agent === undefined) {
         const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
         const sid = SessionId ? SessionId(sessionId) : sessionId
-        const handle = await agents?.resume?.({ resumeSessionId: sid })
+        const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
+        let agentOptions: { provider: string; model: string } | undefined
+        try {
+          const loaded = await persistence?.load?.(sessionId)
+          const context = Array.isArray(loaded?.events)
+            ? [...loaded.events].reverse().find((event: any) => event?.type === 'request/context')?.data
+            : undefined
+          if (typeof context?.provider === 'string' && typeof context?.model === 'string') {
+            agentOptions = { provider: context.provider, model: context.model }
+          }
+        } catch (e: any) {
+          ctx.logger?.warn?.(`[supervisor] auto-resume: could not recover route for ${id}: ${e?.message ?? String(e)}`)
+        }
+        const handle = await agents?.resume?.({
+          resumeSessionId: sid,
+          ...(agentOptions === undefined ? {} : { agentOptions }),
+        })
         agent = handle?.agent
         if (agent !== undefined) ctx.logger?.info?.(`[supervisor] auto-resume: re-attached agent for ${id}`)
       }
