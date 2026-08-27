@@ -62,6 +62,24 @@ describe('resumeInterrupted', () => {
     expect(ctx._logs.some((l: string) => l.includes('sent continue trigger'))).toBe(true)
   })
 
+  it('restores the persisted provider and model when resuming an agent', async () => {
+    const resumeAgent = vi.fn(async () => ({ agent: { followup: vi.fn() } }))
+    const ctx = makeCtx({
+      sessionPersistence: {
+        load: async () => ({
+          events: [{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }],
+        }),
+      },
+      agents: { get: () => undefined, resume: resumeAgent },
+    })
+
+    await resumeInterrupted(ctx, ['proj/session-abc'])
+    expect(resumeAgent).toHaveBeenCalledWith({
+      resumeSessionId: 'session-abc',
+      agentOptions: { provider: 'example-provider', model: 'example-model' },
+    })
+  })
+
   it('does not throw when the agent handle has no followup method', async () => {
     const persistence = {
       load: async () => ({
