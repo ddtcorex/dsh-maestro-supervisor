@@ -8,20 +8,23 @@ import { writeLKG, verifyLKG } from '../src/host/snapshot.js'
 import { writeReport } from '../src/host/report.js'
 
 // All realistic fault cases from DSH local experience (spec §7 + local incidents)
+// fetch 200 + log error → DEGRADED (up:true, degraded:true, no rollback)
+// fetch 500 → FULL (up:false, rollback)
 const cases = [
   {
     id: 'A1-settings-corrupted-json',
     log: 'SyntaxError: Unexpected token { in JSON at position 2 (settings.json)',
     fetchStatus: 200,
-    expectUp: false,
+    expectUp: true,
+    expectDegraded: true,
     expectErrorContains: 'SyntaxError',
   },
   {
     id: 'A2-settings-invalid-schema',
     log: 'Error: settings.json: invalid schema — missing required field',
-    // fetch may still 200 but health should be flagged via log
     fetchStatus: 200,
-    expectUp: false,
+    expectUp: true,
+    expectDegraded: true,
     expectErrorContains: 'JSON',
   },
   {
@@ -29,6 +32,7 @@ const cases = [
     log: 'Error: Cannot find module \'/home/kai/.dsh/profiles/web/node_modules/@ddtcorex/dsh-maestro-memory/lib/index.js\'\nERR_MODULE_NOT_FOUND',
     fetchStatus: 500,
     expectUp: false,
+    expectDegraded: false,
     expectErrorContains: 'ERR_MODULE_NOT_FOUND',
   },
   {
@@ -36,6 +40,7 @@ const cases = [
     log: 'Error: assertChannel failed: channel must match /^\\/[A-Za-z0-9._~-]+$/ — got "dsh-maestro-memory" (missing leading /)',
     fetchStatus: 500,
     expectUp: false,
+    expectDegraded: false,
     expectErrorContains: 'assertChannel',
   },
   {
@@ -43,6 +48,7 @@ const cases = [
     log: 'ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @ddtcorex/dsh-maestro-memory — allowBuilds.esbuild is not set',
     fetchStatus: 500,
     expectUp: false,
+    expectDegraded: false,
     expectErrorContains: 'Failed to load',
   },
   {
@@ -50,34 +56,38 @@ const cases = [
     log: 'Error: Failed to load host plugin @ddtcorex/dsh-maestro-config — ERR_MODULE_NOT_FOUND: Cannot find module lib/index.js (tried lib/host/index.js)',
     fetchStatus: 500,
     expectUp: false,
+    expectDegraded: false,
     expectErrorContains: 'Cannot find module',
   },
   {
     id: 'C1-agent-preset-invalid-yaml',
     log: 'YAMLParseError: bad indentation in ~/.dsh/.agent-presets/test/agent.cordis.yml',
     fetchStatus: 200,
-    expectUp: false,
+    expectUp: true,
+    expectDegraded: true,
     expectErrorContains: 'Failed to load',
   },
   {
     id: 'C2-profile-package-json-corrupted',
     log: 'SyntaxError: Unexpected token in ~/.dsh/profiles/web/package.json',
     fetchStatus: 200,
-    expectUp: false,
+    expectUp: true,
+    expectDegraded: true,
     expectErrorContains: 'SyntaxError',
   },
 ]
 
 describe('realistic cases — health poller', () => {
   for (const c of cases) {
-    it(`${c.id} — pollHealth flags down`, async () => {
+    it(`${c.id} — pollHealth flags correctly`, async () => {
       const r = await pollHealth({
         fetch: async () => ({ status: c.fetchStatus, text: async () => 'ok' }) as any,
         psAlive: async () => c.fetchStatus === 200,
         logTail: async () => c.log,
       })
       expect(r.up).toBe(c.expectUp)
-      if (!c.expectUp) {
+      expect(!!r.degraded).toBe(c.expectDegraded)
+      if (!c.expectUp || c.expectDegraded) {
         expect(r.error).toBeDefined()
       }
     })
@@ -86,7 +96,7 @@ describe('realistic cases — health poller', () => {
 
 describe('realistic cases — supervisor rollback + report + snapshot', () => {
   for (const c of cases) {
-    it(`${c.id} — supervisor triggers rollback and report`, async () => {
+    it(`${c.id} — supervisor handles ${c.expectDegraded ? 'degraded' : 'full'}`, async () => {
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `case-${c.id}-`))
       const dshHome = path.join(tmp, 'dsh-home')
       const lkgRoot = path.join(tmp, 'lkg')
@@ -97,13 +107,16 @@ describe('realistic cases — supervisor rollback + report + snapshot', () => {
       const { ts: lkgTs } = await writeLKG(dshHome, lkgRoot)
       expect(await verifyLKG(path.join(lkgRoot, lkgTs))).toBe(true)
 
-      // corrupt for report context
       fs.writeFileSync(path.join(dshHome, 'maestro/settings.json'), '{ corrupted')
 
       let rollbackCalled = false
       let reportPath = ''
+      let notifyMsg = ''
+      const healthMock = c.expectDegraded
+        ? { up: true, degraded: true, httpCode: c.fetchStatus, error: c.log.slice(0, 100) }
+        : { up: false, degraded: false, httpCode: c.fetchStatus, error: c.log.slice(0, 100) }
       const s = new Supervisor({
-        pollHealth: async () => ({ up: false, httpCode: c.fetchStatus, error: c.log.slice(0, 100) }),
+        pollHealth: async () => healthMock as any,
         writeLKG: async () => ({ ts: lkgTs, manifest: {} as any }),
         writeFailed: async () => {
           const r = await writeLKG(dshHome, failedRoot)
@@ -116,25 +129,31 @@ describe('realistic cases — supervisor rollback + report + snapshot', () => {
             health: opts.health,
             gitDiff: `fault: ${c.id}`,
             logTail: c.log,
-            action: `rollback — ${c.id}`,
+            action: `${c.expectDegraded ? 'degraded' : 'rollback'} — ${c.id}`,
           })
           return reportPath
         },
         rollback: async () => {
           rollbackCalled = true
-          // simulate restore from LKG
           fs.cpSync(path.join(lkgRoot, lkgTs), dshHome, { recursive: true, force: true })
         },
-        notify: async () => {},
+        notify: async (msg) => { notifyMsg = msg },
         debounceMs: 0,
       })
       await s.tick()
-      expect(rollbackCalled).toBe(true)
+      if (c.expectDegraded) {
+        expect(rollbackCalled).toBe(false)
+        expect(notifyMsg).toContain('DEGRADED')
+      } else {
+        expect(rollbackCalled).toBe(true)
+        expect(notifyMsg).toContain('CRASH')
+      }
       expect(fs.existsSync(reportPath)).toBe(true)
       const content = fs.readFileSync(reportPath, 'utf-8')
       expect(content).toContain(c.id)
-      // after rollback, settings should be restored
-      expect(fs.readFileSync(path.join(dshHome, 'maestro/settings.json'), 'utf-8')).toContain('ok')
+      if (!c.expectDegraded) {
+        expect(fs.readFileSync(path.join(dshHome, 'maestro/settings.json'), 'utf-8')).toContain('ok')
+      }
       fs.rmSync(tmp, { recursive: true, force: true })
     })
   }

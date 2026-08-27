@@ -28,7 +28,8 @@ describe('health-poller', () => {
       logTail: async () => 'ERR_MODULE_NOT_FOUND: cannot find lib/index.js',
     })
     expect(r.error).toContain('ERR_MODULE_NOT_FOUND')
-    expect(r.up).toBe(false)
+    expect(r.up).toBe(true)
+    expect(r.degraded).toBe(true)
   })
 
   it('reports degraded when log has assertChannel error but curl ok', async () => {
@@ -37,7 +38,8 @@ describe('health-poller', () => {
       psAlive: async () => true,
       logTail: async () => 'assertChannel failed: channel must start with /',
     })
-    expect(r.up).toBe(false)
+    expect(r.up).toBe(true)
+    expect(r.degraded).toBe(true)
     expect(r.error).toContain('assertChannel')
   })
 })

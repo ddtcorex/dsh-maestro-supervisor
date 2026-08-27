@@ -65,13 +65,30 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     }
   }
 
-  // If either fetch failed or log has error, consider down
-  if (fetchError || logError) {
+  // Distinguish FULL (http !=200) vs DEGRADED (http 200 but log has plugin error)
+  if (fetchError) {
     return {
       up: false,
       httpCode,
-      error: logError ?? fetchError,
-      degraded: !!logError && httpCode === 200,
+      error: logError ? `${fetchError} + ${logError}` : fetchError,
+      degraded: false,
+    }
+  }
+  if (logError) {
+    // http 200 but log error → DEGRADED (isolatable), not FULL
+    if (httpCode === 200) {
+      return {
+        up: true,
+        httpCode,
+        error: logError,
+        degraded: true,
+      }
+    }
+    return {
+      up: false,
+      httpCode,
+      error: logError,
+      degraded: false,
     }
   }
 
@@ -116,9 +133,14 @@ async function defaultLogTail(): Promise<string> {
   try {
     const { readFileSync } = await import('node:fs')
     const { homedir } = await import('node:os')
-    const logPath = `${homedir()}/.dsh.log`
-    const content = readFileSync(logPath, 'utf-8')
-    return content.slice(-5000)
+    const candidates = [`${homedir()}/.dsh/dsh-web.log`, `${homedir()}/.dsh.log`]
+    for (const logPath of candidates) {
+      try {
+        const content = readFileSync(logPath, 'utf-8')
+        if (content) return content.slice(-5000)
+      } catch {}
+    }
+    return ''
   } catch {
     return ''
   }
