@@ -20,6 +20,29 @@ export interface SupervisorDeps {
   // injectable for test / LLM wiring
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
   findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
+  resumeSessions?: (ids: string[]) => Promise<{ resumed: string[] }>
+}
+
+export async function resumeViaRpc(
+  ids: string[],
+  fetchFn: (url: string, init: RequestInit) => Promise<Response> = globalThis.fetch,
+): Promise<{ resumed: string[] }> {
+  const rpcId = crypto.randomUUID()
+  const response = await fetchFn('http://127.0.0.1:3080/dsh-maestro-supervisor-resume/resume', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId, method: 'resume', payload: { ids } }),
+  })
+  if (!response.ok) throw new Error(`resume RPC returned HTTP ${response.status}`)
+  const envelope = await response.json() as any
+  const resumed = envelope?.type === 'server-response'
+    && envelope?.rpcId === rpcId
+    && envelope?.result?.ok === true
+    && Array.isArray(envelope?.result?.value?.resumed)
+    ? envelope.result.value.resumed.filter((id: unknown): id is string => typeof id === 'string')
+    : undefined
+  if (resumed === undefined) throw new Error('resume RPC returned an invalid result')
+  return { resumed }
 }
 
 export class Supervisor {
@@ -40,6 +63,10 @@ export class Supervisor {
 
   private getFindInterrupted() {
     return this.deps.findInterrupted ?? defaultFindInterrupted
+  }
+
+  private getResumeSessions() {
+    return this.deps.resumeSessions ?? resumeViaRpc
   }
 
   private getAutoResumeEnabled(): boolean {
@@ -172,16 +199,15 @@ export class Supervisor {
       await this.deps.notify(`RESUME: ${ids.length} interrupted sessions (${ids.slice(0, 3).join(', ')}) — auto-resume disabled`).catch(() => {})
       return
     }
-    // Auto-resume enabled: notify and best-effort trigger via DSH web (if endpoint exists)
-    await this.deps.notify(`RESUME: ${ids.length} interrupted sessions (${ids.slice(0, 3).join(', ')}) — auto-resuming`).catch(() => {})
-    for (const id of ids) {
-      try {
-        // Try DSH web resume endpoint (best-effort, ignore failures — session remains resumable via UI)
-        const { execSync } = await import('node:child_process')
-        // Session id format is "<group>/<sessionId>" — encode for URL
-        const enc = encodeURIComponent(id)
-        execSync(`curl -s -X POST http://127.0.0.1:3080/api/sessions/${enc}/resume --max-time 2 2>/dev/null || true`, { timeout: 3000, stdio: 'pipe' })
-      } catch {}
+    try {
+      const { resumed } = await this.getResumeSessions()(ids)
+      if (!resumed.length) {
+        await this.deps.notify(`RESUME SKIPPED: no interrupted sessions could be re-attached (${ids.slice(0, 3).join(', ')})`).catch(() => {})
+        return
+      }
+      await this.deps.notify(`RESUME: ${resumed.length} interrupted sessions — continue triggered (${resumed.slice(0, 3).join(', ')})`).catch(() => {})
+    } catch (e: any) {
+      await this.deps.notify(`RESUME FAILED: ${ids.length} interrupted sessions (${ids.slice(0, 3).join(', ')}) — ${e?.message ?? String(e)}`).catch(() => {})
     }
   }
 
