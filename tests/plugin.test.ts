@@ -39,7 +39,7 @@ describe('resumeInterrupted', () => {
     const persistence = {
       load: async () => ({
         events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
-        meta: { preset: 'default' },
+        meta: { agentPreset: 'default' },
       }),
     }
     const createAgent = vi.fn(async () => ({ agent: { followup } }))
@@ -50,6 +50,11 @@ describe('resumeInterrupted', () => {
     })
     await resumeInterrupted(ctx, ['proj/session-abc'])
     expect(createAgent).toHaveBeenCalledTimes(1)
+    // Real DSH core's CreateAgentOptions has no top-level `preset` field — the
+    // preset lives nested at `meta.agentPreset`. Assert the real shape so a
+    // future field-name regression fails this test instead of silently
+    // passing with agents.create() receiving a field it ignores.
+    expect(createAgent).toHaveBeenCalledWith({ sessionId: 'session-abc', meta: { agentPreset: 'default' } })
     expect(followup).toHaveBeenCalledTimes(1)
     const sentMessage = followup.mock.calls[0][0]
     expect(sentMessage.content).toEqual([{ type: 'text', text: 'continue' }])
@@ -61,7 +66,7 @@ describe('resumeInterrupted', () => {
     const persistence = {
       load: async () => ({
         events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
-        meta: { preset: 'default' },
+        meta: { agentPreset: 'default' },
       }),
     }
     const ctx = makeCtx({
@@ -76,7 +81,7 @@ describe('resumeInterrupted', () => {
     const persistence = {
       load: async () => ({
         events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
-        meta: { preset: 'default' },
+        meta: { agentPreset: 'default' },
       }),
     }
     const ctx = makeCtx({

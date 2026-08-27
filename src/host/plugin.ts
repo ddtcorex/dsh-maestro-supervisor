@@ -161,8 +161,8 @@ export async function resumeInterrupted(ctx: any, ids: string[]): Promise<void> 
               if (created) ctx.logger?.info?.(`[supervisor] auto-resume: re-created session ${id} with ${loaded.events.length} events`)
               try {
                 const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
-                if (agents?.create && loaded.meta?.preset) {
-                  const handle = await agents.create({ sessionId: sid, preset: loaded.meta.preset })
+                if (agents?.create && loaded.meta?.agentPreset) {
+                  const handle = await agents.create({ sessionId: sid, meta: { agentPreset: loaded.meta.agentPreset } })
                   ctx.logger?.info?.(`[supervisor] auto-resume: agent re-attached for ${id}`)
                   try {
                     const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
