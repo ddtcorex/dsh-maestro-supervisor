@@ -9,7 +9,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { findInterrupted as defaultFindInterrupted } from './resume.js'
+import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
 
 export const inject = ['sessions', 'connection'] as const
 
@@ -114,12 +114,14 @@ export async function runAutoResume(
   ctx: any,
   opts: {
     findInterrupted?: typeof defaultFindInterrupted
+    findDanglingOpenTurns?: typeof defaultFindDanglingOpenTurns
     resumeInterrupted?: typeof resumeInterrupted
     config?: SupervisorPluginConfig
   } = {}
 ): Promise<void> {
   try {
     const doFind = opts.findInterrupted ?? defaultFindInterrupted
+    const doFindDangling = opts.findDanglingOpenTurns ?? defaultFindDanglingOpenTurns
     const doResume = opts.resumeInterrupted ?? resumeInterrupted
     if (!getAutoResumeEnabled(opts?.config)) {
       ctx.logger?.info?.('[supervisor] auto-resume disabled — skip')
@@ -127,12 +129,24 @@ export async function runAutoResume(
     }
     const withinMs = getResumeWithinMs(opts?.config)
     const { scanned, interrupted } = await doFind(undefined, { withinMs })
-    if (!interrupted.length) {
+    // Only safe to treat a dangling open turn as crashed right after a fresh
+    // boot, when this process is the sole live owner of these sessions —
+    // exactly the context runAutoResume runs in (called once, 8s after
+    // apply()). resumeInterrupted()'s own "already live" check additionally
+    // protects any id that happens to be live in *this* process already.
+    let dangling: string[] = []
+    try {
+      dangling = (await doFindDangling(undefined, { withinMs })).interrupted
+    } catch (e: any) {
+      ctx.logger?.warn?.(`[supervisor] auto-resume: dangling-open-turn scan failed, continuing with closed-turn results only: ${e?.message ?? String(e)}`)
+    }
+    const merged = Array.from(new Set([...interrupted, ...dangling]))
+    if (!merged.length) {
       ctx.logger?.info?.(`[supervisor] auto-resume: 0/${scanned} interrupted within ${withinMs}ms — nothing to do`)
       return
     }
-    ctx.logger?.info?.(`[supervisor] auto-resume: ${interrupted.length}/${scanned} interrupted within ${withinMs}ms: ${interrupted.slice(0, 3).join(', ')}`)
-    await doResume(ctx, interrupted)
+    ctx.logger?.info?.(`[supervisor] auto-resume: ${merged.length}/${scanned} interrupted within ${withinMs}ms: ${merged.slice(0, 3).join(', ')}`)
+    await doResume(ctx, merged)
   } catch (e: any) {
     try {
       ctx.logger?.warn?.(`[supervisor] auto-resume error: ${e?.message ?? String(e)}`)

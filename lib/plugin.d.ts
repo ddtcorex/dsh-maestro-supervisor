@@ -5,7 +5,7 @@
  * a restart. The standalone daemon (systemd) handles crash detection
  * and web restart; this plugin handles the in-process resume.
  */
-import { findInterrupted as defaultFindInterrupted } from './resume.js';
+import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js';
 export declare const inject: readonly ["sessions", "connection"];
 export interface SupervisorPluginConfig {
     autoResumeWithin?: number | string;
@@ -13,6 +13,7 @@ export interface SupervisorPluginConfig {
 }
 export declare function runAutoResume(ctx: any, opts?: {
     findInterrupted?: typeof defaultFindInterrupted;
+    findDanglingOpenTurns?: typeof defaultFindDanglingOpenTurns;
     resumeInterrupted?: typeof resumeInterrupted;
     config?: SupervisorPluginConfig;
 }): Promise<void>;

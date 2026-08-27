@@ -121,11 +121,16 @@ describe('runAutoResume', () => {
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
   })
 
+  // A no-op stand-in for the dangling-open-turn scan — real machines have
+  // real session data under ~/.dsh/sessions, so any test asserting exact
+  // resumeInterrupted call contents must not fall through to the real scan.
+  const noDangling = async () => ({ scanned: 0, interrupted: [] })
+
   it('calls resumeInterrupted with the scanned ids when interrupted sessions exist', async () => {
     const ctx = makeCtx()
     const scan = async () => ({ scanned: 2, interrupted: ['proj/a-1', 'proj/b-2'] })
     const resumeSpy = vi.fn(async () => {})
-    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy, config: enabledConfig })
+    await runAutoResume(ctx, { findInterrupted: scan as any, findDanglingOpenTurns: noDangling, resumeInterrupted: resumeSpy, config: enabledConfig })
     expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1', 'proj/b-2'])
   })
 
@@ -133,7 +138,7 @@ describe('runAutoResume', () => {
     const ctx = makeCtx()
     const scan = async () => ({ scanned: 5, interrupted: [] })
     const resumeSpy = vi.fn(async () => {})
-    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy, config: enabledConfig })
+    await runAutoResume(ctx, { findInterrupted: scan as any, findDanglingOpenTurns: noDangling, resumeInterrupted: resumeSpy, config: enabledConfig })
     expect(resumeSpy).not.toHaveBeenCalled()
   })
 
@@ -177,6 +182,38 @@ describe('runAutoResume', () => {
       if (prevEnv === undefined) delete process.env.DSH_SUPERVISOR_RESUME_WITHIN
       else process.env.DSH_SUPERVISOR_RESUME_WITHIN = prevEnv
     }
+  })
+
+  it('merges findInterrupted and findDanglingOpenTurns results (deduped) before resuming', async () => {
+    const ctx = makeCtx()
+    const findInterruptedSpy = vi.fn(async () => ({ scanned: 5, interrupted: ['proj/a-1', 'proj/shared'] }))
+    const findDanglingSpy = vi.fn(async () => ({ scanned: 5, interrupted: ['proj/shared', 'proj/b-2'] }))
+    const resumeSpy = vi.fn(async () => {})
+    await runAutoResume(ctx, {
+      findInterrupted: findInterruptedSpy,
+      findDanglingOpenTurns: findDanglingSpy,
+      resumeInterrupted: resumeSpy,
+      config: enabledConfig,
+    })
+    expect(findDanglingSpy).toHaveBeenCalledTimes(1)
+    expect(resumeSpy).toHaveBeenCalledTimes(1)
+    const resumedIds = resumeSpy.mock.calls[0][1] as string[]
+    expect(resumedIds.sort()).toEqual(['proj/a-1', 'proj/b-2', 'proj/shared'])
+  })
+
+  it('does not throw when findDanglingOpenTurns throws — falls back to findInterrupted results alone', async () => {
+    const ctx = makeCtx()
+    const findInterruptedSpy = vi.fn(async () => ({ scanned: 1, interrupted: ['proj/a-1'] }))
+    const findDanglingSpy = vi.fn(async () => { throw new Error('dangling scan failed') })
+    const resumeSpy = vi.fn(async () => {})
+    await expect(runAutoResume(ctx, {
+      findInterrupted: findInterruptedSpy,
+      findDanglingOpenTurns: findDanglingSpy,
+      resumeInterrupted: resumeSpy,
+      config: enabledConfig,
+    })).resolves.toBeUndefined()
+    expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1'])
+    expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
   })
 })
 
