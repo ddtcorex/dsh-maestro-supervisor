@@ -28,10 +28,12 @@ const ERROR_PATTERNS = [
   'allowBuilds',
   'Cannot find module',
   'Failed to load',
+  'EADDRINUSE',
+  'address already in use',
 ]
 
 export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState> {
-  const fetchFn = opts.fetch ?? defaultFetch(opts.url ?? 'http://127.0.0.1:3080/', opts.timeoutMs ?? 2000)
+  const fetchFn = opts.fetch ?? defaultFetch(opts.url ?? 'http://127.0.0.1:3080/', opts.timeoutMs ?? 5000)
   const psAliveFn = opts.psAlive ?? defaultPsAlive
   const logTailFn = opts.logTail ?? defaultLogTail
 

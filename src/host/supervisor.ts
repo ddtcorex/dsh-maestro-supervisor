@@ -8,6 +8,7 @@ export interface SupervisorDeps {
   writeFailed: () => Promise<{ ts: string; manifest: any }>
   writeReport: (opts: { ts: string; health: HealthState; action: string; logTail?: string; gitDiff?: string }) => Promise<string>
   rollback: (ts?: string) => Promise<void>
+  restartWeb?: () => Promise<void>
   notify: (msg: string) => Promise<void>
   intervalMs?: number
   debounceMs?: number
@@ -138,7 +139,20 @@ export class Supervisor {
       const logTail = (health as any).logTail ?? ''
       const gitDiff = await this.collectGitDiff().catch(() => '')
       const reportPath = await this.deps.writeReport({ ts, health, action: `rollback — ${health.error ?? 'down'}`, logTail, gitDiff }).catch(() => '')
-      await this.deps.rollback()
+      try {
+        await this.deps.rollback()
+      } catch (e: any) {
+        await this.deps.notify(`rollback failed: ${e?.message ?? String(e)} (report: ${reportPath})`).catch(() => {})
+      }
+      // Always attempt to (re)start dsh web — survives reboot even when rollback is a no-op
+      if (this.deps.restartWeb) {
+        try {
+          await this.deps.restartWeb()
+          await this.deps.notify(`restarted dsh-web after rollback (report: ${reportPath})`).catch(() => {})
+        } catch (e: any) {
+          await this.deps.notify(`restart dsh-web failed: ${e?.message ?? String(e)} (report: ${reportPath})`).catch(() => {})
+        }
+      }
       await this.deps.notify(`CRASH detected → rollback (report: ${reportPath}, error: ${health.error ?? 'down'})`).catch(() => {})
       const runner = this.getRunDebugAgent()
       const finder = this.getFindInterrupted()
@@ -167,6 +181,8 @@ export class Supervisor {
     if (this.timer) return
     const intervalMs = this.deps.intervalMs ?? 3000
     this.timer = setInterval(() => { this.tick().catch(() => {}) }, intervalMs)
+    // Immediate tick so a reboot is recovered in ~0-3s, not 3s
+    this.tick().catch(() => {})
   }
 
   stop(): void {

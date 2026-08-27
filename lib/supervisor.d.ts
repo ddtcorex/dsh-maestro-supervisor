@@ -17,6 +17,7 @@ export interface SupervisorDeps {
         gitDiff?: string;
     }) => Promise<string>;
     rollback: (ts?: string) => Promise<void>;
+    restartWeb?: () => Promise<void>;
     notify: (msg: string) => Promise<void>;
     intervalMs?: number;
     debounceMs?: number;
