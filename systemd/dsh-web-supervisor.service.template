@@ -7,7 +7,7 @@ Wants=dsh-web.service
 Type=simple
 # Portable: sources nvm directly (bash -lc alone fails — ~/.bashrc guard),
 # then execs node (works for nvm, fnm, volta, system via PATH fallback)
-ExecStart=/bin/bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; exec node %MAESTRO_ROOT%/packages/dsh-maestro-supervisor/lib/index.js daemon'
+ExecStart=/bin/bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; exec node %MAESTRO_ROOT%/packages/dsh-maestro-supervisor/lib/bin.js daemon'
 Restart=always
 RestartSec=2
 Environment=DSH_HOME=%h/.dsh
