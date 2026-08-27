@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "rootDir": "src/host",
+    "outDir": "lib",
+    "module": "nodenext",
+    "target": "ES2022",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true
+  },
+  "include": ["src/host"]
+}
