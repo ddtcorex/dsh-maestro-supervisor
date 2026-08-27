@@ -33,6 +33,60 @@ describe('resumeInterrupted', () => {
     await expect(resumeInterrupted(ctx, ['proj/bad-1', 'proj/bad-2'])).resolves.toBeUndefined()
     expect(ctx._logs.filter((l: string) => l.includes('warn:')).length).toBeGreaterThanOrEqual(2)
   })
+
+  it('sends a "continue" follow-up turn after successfully re-attaching an agent', async () => {
+    const followup = vi.fn()
+    const persistence = {
+      load: async () => ({
+        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        meta: { preset: 'default' },
+      }),
+    }
+    const createAgent = vi.fn(async () => ({ agent: { followup } }))
+    const ctx = makeCtx({
+      sessionPersistence: persistence,
+      sessions: { get: () => undefined, create: () => true },
+      agents: { create: createAgent },
+    })
+    await resumeInterrupted(ctx, ['proj/session-abc'])
+    expect(createAgent).toHaveBeenCalledTimes(1)
+    expect(followup).toHaveBeenCalledTimes(1)
+    const sentMessage = followup.mock.calls[0][0]
+    expect(sentMessage.content).toEqual([{ type: 'text', text: 'continue' }])
+    expect(sentMessage.source).toEqual({ kind: 'user' })
+    expect(ctx._logs.some((l: string) => l.includes('sent continue trigger'))).toBe(true)
+  })
+
+  it('does not throw when the agent handle has no followup method', async () => {
+    const persistence = {
+      load: async () => ({
+        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        meta: { preset: 'default' },
+      }),
+    }
+    const ctx = makeCtx({
+      sessionPersistence: persistence,
+      sessions: { get: () => undefined, create: () => true },
+      agents: { create: async () => ({ agent: {} }) },
+    })
+    await expect(resumeInterrupted(ctx, ['proj/session-abc'])).resolves.toBeUndefined()
+  })
+
+  it('does not throw when agents.create rejects', async () => {
+    const persistence = {
+      load: async () => ({
+        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        meta: { preset: 'default' },
+      }),
+    }
+    const ctx = makeCtx({
+      sessionPersistence: persistence,
+      sessions: { get: () => undefined, create: () => true },
+      agents: { create: async () => { throw new Error('factory unavailable') } },
+    })
+    await expect(resumeInterrupted(ctx, ['proj/session-abc'])).resolves.toBeUndefined()
+    expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
 })
 
 describe('runAutoResume', () => {

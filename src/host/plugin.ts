@@ -162,10 +162,24 @@ export async function resumeInterrupted(ctx: any, ids: string[]): Promise<void> 
               try {
                 const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
                 if (agents?.create && loaded.meta?.preset) {
-                  await agents.create({ sessionId: sid, preset: loaded.meta.preset }).catch(() => {})
+                  const handle = await agents.create({ sessionId: sid, preset: loaded.meta.preset })
                   ctx.logger?.info?.(`[supervisor] auto-resume: agent re-attached for ${id}`)
+                  try {
+                    const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
+                      createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),
+                    }))
+                    handle?.agent?.followup?.(createUserMessage({
+                      content: [{ type: 'text', text: 'continue' }],
+                      source: { kind: 'user' },
+                    }))
+                    ctx.logger?.info?.(`[supervisor] auto-resume: sent continue trigger for ${id}`)
+                  } catch (e: any) {
+                    ctx.logger?.warn?.(`[supervisor] auto-resume: continue trigger failed for ${id}: ${e?.message ?? String(e)}`)
+                  }
                 }
-              } catch {}
+              } catch (e: any) {
+                ctx.logger?.warn?.(`[supervisor] auto-resume: agent create failed for ${id}: ${e?.message ?? String(e)}`)
+              }
             } catch (e: any) {
               ctx.logger?.info?.(`[supervisor] auto-resume: session ${id} has ${loaded.events.length} events, would resume (create failed: ${e?.message ?? String(e)})`)
             }
