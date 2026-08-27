@@ -1,6 +1,6 @@
 import type { HealthState } from './health-poller.js'
 import { runDebugAgent } from './debug-agent.js'
-import { findInterrupted } from './resume.js'
+import { findInterrupted as defaultFindInterrupted } from './resume.js'
 
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
@@ -12,6 +12,9 @@ export interface SupervisorDeps {
   intervalMs?: number
   debounceMs?: number
   getTime?: () => number
+  // injectable for test / LLM wiring
+  runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
+  findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
 }
 
 export class Supervisor {
@@ -26,6 +29,31 @@ export class Supervisor {
     this.deps = deps
   }
 
+  private getRunDebugAgent() {
+    return this.deps.runDebugAgent ?? runDebugAgent
+  }
+
+  private getFindInterrupted() {
+    return this.deps.findInterrupted ?? defaultFindInterrupted
+  }
+
+  private handleDebugResult(reportPath: string, res: { fixed: boolean; reason: string }): void {
+    if (res.fixed) {
+      void this.deps.notify(`FIXED: debug-agent fixed ${reportPath} — ${res.reason}`).catch(() => {})
+      // After fix, try to resume interrupted sessions
+      void this.getFindInterrupted()().then(r => {
+        if (r.interrupted.length) void this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0, 3).join(', ')})`).catch(() => {})
+      }).catch(() => {})
+    } else if (res.reason.includes('max attempts')) {
+      void this.deps.notify(`FIX FAILED after 3 attempts — needs human (report: ${reportPath}, reason: ${res.reason})`).catch(() => {})
+    } else if (res.reason.includes('cooldown')) {
+      // silent — cooldown, no notify
+    } else {
+      // non-fixed but not max attempts — still surface for visibility
+      void this.deps.notify(`FIX FAILED: ${res.reason} (report: ${reportPath})`).catch(() => {})
+    }
+  }
+
   async tick(): Promise<void> {
     const health = await this.deps.pollHealth()
 
@@ -38,11 +66,21 @@ export class Supervisor {
         const ts = new Date().toISOString().replace(/[:.]/g, '-')
         const reportPath = await this.deps.writeReport({ ts, health, action: `degraded — ${health.error ?? 'plugin'}` }).catch(() => '')
         await this.deps.notify(`DEGRADED: ${health.error ?? 'plugin'} (report: ${reportPath})`).catch(() => {})
-        // Phase 3: fire-and-forget debug + resume (never block tick, skip in test)
-        if (!process.env.VITEST) {
-          void runDebugAgent({ reportPath, health }).catch(() => {})
+        // Phase 3: debug + resume — use injected fn if provided (even in VITEST), otherwise fire-and-forget real impl (skip in VITEST)
+        const runner = this.getRunDebugAgent()
+        const finder = this.getFindInterrupted()
+        const isInjected = !!this.deps.runDebugAgent
+        if (isInjected) {
+          void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
           setTimeout(() => {
-            findInterrupted().then(r => {
+            finder().then(r => {
+              if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0,3).join(', ')})`).catch(() => {})
+            }).catch(() => {})
+          }, 0)
+        } else if (!process.env.VITEST) {
+          void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
+          setTimeout(() => {
+            finder().then(r => {
               if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0,3).join(', ')})`).catch(() => {})
             }).catch(() => {})
           }, 0)
@@ -80,10 +118,20 @@ export class Supervisor {
       const reportPath = await this.deps.writeReport({ ts, health, action: `rollback — ${health.error ?? 'down'}` }).catch(() => '')
       await this.deps.rollback()
       await this.deps.notify(`CRASH detected → rollback (report: ${reportPath}, error: ${health.error ?? 'down'})`).catch(() => {})
-      if (!process.env.VITEST) {
-        void runDebugAgent({ reportPath, health }).catch(() => {})
+      const runner = this.getRunDebugAgent()
+      const finder = this.getFindInterrupted()
+      const isInjected = !!this.deps.runDebugAgent
+      if (isInjected) {
+        void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
         setTimeout(() => {
-          findInterrupted().then(r => {
+          finder().then(r => {
+            if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions`).catch(() => {})
+          }).catch(() => {})
+        }, 0)
+      } else if (!process.env.VITEST) {
+        void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
+        setTimeout(() => {
+          finder().then(r => {
             if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions`).catch(() => {})
           }).catch(() => {})
         }, 0)
