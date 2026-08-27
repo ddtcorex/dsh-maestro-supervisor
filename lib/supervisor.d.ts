@@ -25,6 +25,7 @@ export declare class Supervisor {
     private lastRollback;
     private rollingBack;
     private lastLKGWrite;
+    private lastDegradedNotify;
     private timer;
     constructor(deps: SupervisorDeps);
     tick(): Promise<void>;
