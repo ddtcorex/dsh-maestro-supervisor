@@ -43,9 +43,15 @@ export class Supervisor {
   }
 
   private getResumeWithinMs(): number {
-    // Priority: env > supervisor config.json > maestro settings.json > default 5m
+    // Priority: env > supervisor config.json > maestro settings.json > default 5 (minutes)
+    // Note: config value is in MINUTES (number 5 = 5 minutes). String "5m"/"30s"/"1h" also supported via parseDuration.
     const env = process.env.DSH_SUPERVISOR_RESUME_WITHIN
     if (env) {
+      // Bare number in env like "5" → treat as minutes for ergonomics
+      if (/^\d+$/.test(env.trim())) {
+        const n = parseInt(env.trim(), 10)
+        if (!isNaN(n)) return n * 60 * 1000
+      }
       const v = parseDuration(env)
       if (v !== undefined) return v
       const n = parseInt(env, 10)
@@ -57,21 +63,23 @@ export class Supervisor {
         const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'))
         const raw = (cfg as any).autoResumeWithin ?? (cfg as any).resumeWithin
         if (typeof raw === 'string') {
+          if (/^\d+$/.test(raw.trim())) return parseInt(raw.trim(), 10) * 60 * 1000 // bare string digits → minutes
           const v = parseDuration(raw)
           if (v !== undefined) return v
-        } else if (typeof raw === 'number') return raw
+        } else if (typeof raw === 'number') return raw * 60 * 1000 // number is MINUTES
       }
       const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
       if (fs.existsSync(maestroPath)) {
         const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
         const raw = j?.domains?.supervisor?.autoResumeWithin ?? j?.supervisor?.autoResumeWithin
         if (typeof raw === 'string') {
+          if (/^\d+$/.test(raw.trim())) return parseInt(raw.trim(), 10) * 60 * 1000
           const v = parseDuration(raw)
           if (v !== undefined) return v
-        } else if (typeof raw === 'number') return raw
+        } else if (typeof raw === 'number') return raw * 60 * 1000
       }
     } catch {}
-    return 5 * 60 * 1000 // default 5m
+    return 5 * 60 * 1000 // default 5 minutes
   }
 
   private async findInterruptedRecent(withinMs?: number): Promise<{ scanned: number; interrupted: string[] }> {
