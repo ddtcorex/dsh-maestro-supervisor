@@ -13,7 +13,7 @@ vi.mock('node:child_process', async () => {
 })
 
 import * as childProcess from 'node:child_process'
-import { findInterrupted } from '../src/host/resume.js'
+import { findInterrupted, findDanglingOpenTurns } from '../src/host/resume.js'
 
 const mockedExecSync = childProcess.execSync as unknown as ReturnType<typeof vi.fn>
 
@@ -158,5 +158,68 @@ describe('findInterrupted — Finding 1: mtime pre-filter avoids decompression',
     const res = await findInterrupted(tmp) // no opts -> no window
     expect(mockedExecSync).toHaveBeenCalledTimes(1)
     expect(res.interrupted).toContain('proj/sess-old-unfiltered')
+  })
+})
+
+describe('findDanglingOpenTurns — genuinely fresh crash, no closer written yet', () => {
+  it('detects a session whose log ends mid-turn with no turn/end at all', async () => {
+    const dir = sessionDir('proj', 'sess-crashed')
+    const now = Date.now()
+    writeJsonl(dir, [
+      JSON.stringify({ type: 'turn/start', time: now - 2000, data: { turn: 1 } }),
+      JSON.stringify({ type: 'step/start', time: now - 1900, data: { turn: 1, step: 1 } }),
+      JSON.stringify({ type: 'request/header', time: now - 1800, data: {} }),
+    ])
+    const res = await findDanglingOpenTurns(tmp)
+    expect(res.interrupted).toContain('proj/sess-crashed')
+  })
+
+  it('does not flag a session whose last turn closed cleanly', async () => {
+    const dir = sessionDir('proj', 'sess-clean')
+    const now = Date.now()
+    writeJsonl(dir, [
+      JSON.stringify({ type: 'turn/start', time: now - 2000, data: { turn: 1 } }),
+      JSON.stringify({ type: 'turn/end', time: now - 1000, data: { turn: 1, reason: { kind: 'completed' } } }),
+    ])
+    const res = await findDanglingOpenTurns(tmp)
+    expect(res.interrupted).not.toContain('proj/sess-clean')
+  })
+
+  it('does not flag a session that is simply idle (no turn ever started)', async () => {
+    const dir = sessionDir('proj', 'sess-idle')
+    writeJsonl(dir, [
+      JSON.stringify({ type: 'session', time: Date.now() - 5000 }),
+    ])
+    const res = await findDanglingOpenTurns(tmp)
+    expect(res.interrupted).not.toContain('proj/sess-idle')
+  })
+
+  it('does not flag a session where an earlier turn closed and a later turn is the one still open (matches by turn number, not just "any turn/end seen")', async () => {
+    const dir = sessionDir('proj', 'sess-multi-turn')
+    const now = Date.now()
+    writeJsonl(dir, [
+      JSON.stringify({ type: 'turn/start', time: now - 5000, data: { turn: 1 } }),
+      JSON.stringify({ type: 'turn/end', time: now - 4000, data: { turn: 1, reason: { kind: 'completed' } } }),
+      JSON.stringify({ type: 'turn/start', time: now - 2000, data: { turn: 2 } }),
+      JSON.stringify({ type: 'step/start', time: now - 1900, data: { turn: 2, step: 1 } }),
+    ])
+    const res = await findDanglingOpenTurns(tmp)
+    expect(res.interrupted).toContain('proj/sess-multi-turn')
+  })
+
+  it('respects the withinMs window using the open turn/start time', async () => {
+    const dir = sessionDir('proj', 'sess-old-crash')
+    const oldTime = new Date(Date.now() - 60 * 60 * 1000)
+    writeJsonl(dir, [
+      JSON.stringify({ type: 'turn/start', time: oldTime.getTime(), data: { turn: 1 } }),
+    ], oldTime)
+    const res = await findDanglingOpenTurns(tmp, { withinMs: 5 * 60 * 1000 })
+    expect(res.interrupted).not.toContain('proj/sess-old-crash')
+  })
+
+  it('does not crash on garbage/unparseable lines', async () => {
+    const dir = sessionDir('proj', 'sess-garbage')
+    writeJsonl(dir, ['not json at all', '{"broken"'])
+    await expect(findDanglingOpenTurns(tmp)).resolves.toBeDefined()
   })
 })
