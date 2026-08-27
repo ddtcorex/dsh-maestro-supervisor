@@ -3,6 +3,7 @@ export interface HealthState {
     httpCode?: number;
     error?: string;
     degraded?: boolean;
+    logTail?: string;
 }
 export interface PollHealthOpts {
     fetch?: () => Promise<{
@@ -15,3 +16,4 @@ export interface PollHealthOpts {
     timeoutMs?: number;
 }
 export declare function pollHealth(opts?: PollHealthOpts): Promise<HealthState>;
+export declare function collectLogTail(): Promise<string>;

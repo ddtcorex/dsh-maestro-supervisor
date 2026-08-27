@@ -6,7 +6,7 @@ export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
   writeLKG: () => Promise<{ ts: string; manifest: any }>
   writeFailed: () => Promise<{ ts: string; manifest: any }>
-  writeReport: (opts: { ts: string; health: HealthState; action: string }) => Promise<string>
+  writeReport: (opts: { ts: string; health: HealthState; action: string; logTail?: string; gitDiff?: string }) => Promise<string>
   rollback: (ts?: string) => Promise<void>
   notify: (msg: string) => Promise<void>
   intervalMs?: number
@@ -37,6 +37,24 @@ export class Supervisor {
     return this.deps.findInterrupted ?? defaultFindInterrupted
   }
 
+  private async collectGitDiff(): Promise<string> {
+    try {
+      const { execSync } = await import('node:child_process')
+      const ws = process.env.MAESTRO_HARNESS_ROOT ?? '/home/kai/Work/htdocs/maestro-harness'
+      try {
+        const out = execSync(`git -C ${JSON.stringify(ws)} status --porcelain 2>/dev/null | head -n 50`, { encoding: 'utf-8', timeout: 2000 })
+        if (out.trim()) {
+          const diff = execSync(`git -C ${JSON.stringify(ws)} diff 2>/dev/null | head -n 200`, { encoding: 'utf-8', timeout: 2000 })
+          return diff || out
+        }
+      } catch {}
+      const diff = execSync('git diff 2>/dev/null | head -n 200', { encoding: 'utf-8', timeout: 2000 })
+      return diff.trim() ? diff : ''
+    } catch {
+      return ''
+    }
+  }
+
   private handleDebugResult(reportPath: string, res: { fixed: boolean; reason: string }): void {
     if (res.fixed) {
       void this.deps.notify(`FIXED: debug-agent fixed ${reportPath} — ${res.reason}`).catch(() => {})
@@ -64,7 +82,9 @@ export class Supervisor {
       this.lastDegradedNotify = now
       try {
         const ts = new Date().toISOString().replace(/[:.]/g, '-')
-        const reportPath = await this.deps.writeReport({ ts, health, action: `degraded — ${health.error ?? 'plugin'}` }).catch(() => '')
+        const logTail = (health as any).logTail ?? ''
+        const gitDiff = await this.collectGitDiff().catch(() => '')
+        const reportPath = await this.deps.writeReport({ ts, health, action: `degraded — ${health.error ?? 'plugin'}`, logTail, gitDiff }).catch(() => '')
         await this.deps.notify(`DEGRADED: ${health.error ?? 'plugin'} (report: ${reportPath})`).catch(() => {})
         // Phase 3: debug + resume — use injected fn if provided (even in VITEST), otherwise fire-and-forget real impl (skip in VITEST)
         const runner = this.getRunDebugAgent()
@@ -115,7 +135,9 @@ export class Supervisor {
     try {
       const failed = await this.deps.writeFailed().catch(() => ({ ts: new Date().toISOString().replace(/[:.]/g, '-'), manifest: null }))
       const ts = (failed as any)?.ts ?? new Date().toISOString().replace(/[:.]/g, '-')
-      const reportPath = await this.deps.writeReport({ ts, health, action: `rollback — ${health.error ?? 'down'}` }).catch(() => '')
+      const logTail = (health as any).logTail ?? ''
+      const gitDiff = await this.collectGitDiff().catch(() => '')
+      const reportPath = await this.deps.writeReport({ ts, health, action: `rollback — ${health.error ?? 'down'}`, logTail, gitDiff }).catch(() => '')
       await this.deps.rollback()
       await this.deps.notify(`CRASH detected → rollback (report: ${reportPath}, error: ${health.error ?? 'down'})`).catch(() => {})
       const runner = this.getRunDebugAgent()
