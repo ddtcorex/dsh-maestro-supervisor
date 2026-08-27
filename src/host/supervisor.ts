@@ -1,4 +1,6 @@
 import type { HealthState } from './health-poller.js'
+import { runDebugAgent } from './debug-agent.js'
+import { findInterrupted } from './resume.js'
 
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
@@ -36,6 +38,15 @@ export class Supervisor {
         const ts = new Date().toISOString().replace(/[:.]/g, '-')
         const reportPath = await this.deps.writeReport({ ts, health, action: `degraded — ${health.error ?? 'plugin'}` }).catch(() => '')
         await this.deps.notify(`DEGRADED: ${health.error ?? 'plugin'} (report: ${reportPath})`).catch(() => {})
+        // Phase 3: fire-and-forget debug + resume (never block tick, skip in test)
+        if (!process.env.VITEST) {
+          void runDebugAgent({ reportPath, health }).catch(() => {})
+          setTimeout(() => {
+            findInterrupted().then(r => {
+              if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0,3).join(', ')})`).catch(() => {})
+            }).catch(() => {})
+          }, 0)
+        }
       } catch {}
       return
     }
@@ -69,6 +80,14 @@ export class Supervisor {
       const reportPath = await this.deps.writeReport({ ts, health, action: `rollback — ${health.error ?? 'down'}` }).catch(() => '')
       await this.deps.rollback()
       await this.deps.notify(`CRASH detected → rollback (report: ${reportPath}, error: ${health.error ?? 'down'})`).catch(() => {})
+      if (!process.env.VITEST) {
+        void runDebugAgent({ reportPath, health }).catch(() => {})
+        setTimeout(() => {
+          findInterrupted().then(r => {
+            if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions`).catch(() => {})
+          }).catch(() => {})
+        }, 0)
+      }
     } finally {
       this.rollingBack = false
     }
