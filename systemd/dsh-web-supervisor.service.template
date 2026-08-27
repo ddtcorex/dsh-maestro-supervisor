@@ -8,6 +8,10 @@ ExecStart=%h/.nvm/versions/node/v24.19.0/bin/node %h/Work/htdocs/maestro-harness
 Restart=always
 RestartSec=2
 Environment=DSH_HOME=%h/.dsh
+# Optional Telegram — loose mode: set these if you want Telegram alerts, otherwise daemon logs only
+# Environment=TELEGRAM_BOT_TOKEN=your_bot_token
+# Environment=TELEGRAM_CHAT_ID=your_chat_id
+# For hard dependency (workspace:^), ensure notifier is installed: pnpm add @ddtcorex/dsh-maestro-notifier
 
 [Install]
 WantedBy=default.target

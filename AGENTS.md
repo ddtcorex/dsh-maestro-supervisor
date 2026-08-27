@@ -61,11 +61,26 @@ DSH_INTEGRATION=1 pnpm test -- tests/integration.test.ts
 - **Debounce + rolling guard** — at most 1 rollback per 60s, single `rollingBack` flag, `flock` on `~/.dsh/.supervisor/lock` for cross-process safety.
 - **Never block on notifier** — Telegram failures are swallowed and retried.
 
+## Dependency patterns
+
+### Supervisor → Notifier (1-way, loose by default, hard optional)
+
+- **Loose (recommended):** No `package.json` dependency. `notifier.ts` tries `import('@ddtcorex/dsh-maestro-notifier')` dynamically, then `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` env, then falls back to `console.log`. `systemd` template leaves `Environment=TELEGRAM_*` commented — uncomment if you want Telegram, otherwise daemon logs only and never blocks rollback. This keeps supervisor runnable when notifier is not installed.
+- **Hard (workspace):** Add to `package.json` `"dependencies": {"@ddtcorex/dsh-maestro-notifier": "workspace:^0.1.0"}` and to `pnpm-workspace.yaml` `packages: [".", "../dsh-maestro-notifier"]` + `allowBuilds.esbuild: true`. Then `pnpm install` resolves the link and `defaultSend` hits the hard import on every call. Use only if you want a guaranteed Telegram path and accept the coupled publish order (notifier must be published before supervisor).
+
+### Two Cordis plugins that need each other (A ↔ B)
+
+Never `A inject: ['B']` and `B inject: ['A']` — Cordis will deadlock. Pick one:
+
+1. **Extract shared lib C** (like `dsh-maestro-config-lib`): `C` provides `serviceC`, both `A` and `B` do `inject: ['serviceC']`, `C` injects nobody. Put `C` in `pnpm-workspace.yaml` `packages: ["../dsh-maestro-C"]` for both. This is the cleanest for true mutual data (e.g., `guard` ↔ `observe` sharing health).
+2. **One-way + events:** `A` provides `serviceA`, `B` does `inject: ['serviceA']` and `ctx.emit('b:done', payload)`; `A` listens with `ctx.on('b:done', ...)`. No reverse inject, so no cycle.
+3. **Isolate + RPC:** If they must stay separate, use `isolate` realms and a `/dsh-maestro-A` RPC channel instead of direct `inject`.
+
 ## Validation
 
 - `pnpm verify` + `pnpm test` green before any success claim.
 - `test -f lib/index.js` after build (like other host packages).
-- For daemon changes, manual ephemeral check: `DSH_HOME=$(mktemp -d) pnpm --dir deepseek-harness exec dsh web --port 0` + corrupt `settings.json` → assert report + rollback within 10s.
+- For daemon changes, manual ephemeral check: `DSH_HOME=$(mktemp -d) pnpm --dir deepseek-harness dsh web --port 0` + corrupt `settings.json` → assert report + rollback within 10s.
 
 ## See Also
 
