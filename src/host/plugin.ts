@@ -177,30 +177,40 @@ export function apply(ctx: any, _config: SupervisorPluginConfig = {}): void {
         ctx.logger?.info?.(`[supervisor] auto-resume: ${interrupted.length}/${scanned} interrupted within ${withinMs}ms: ${interrupted.slice(0,3).join(', ')}`)
 
         // For each interrupted session, try to resume via sessions service.
-        // We do not have a direct "resume" API, but we can re-create the session
-        // with its persisted seed — DSH's session persistence will treat it as
-        // a resume (the log is re-read, interrupted turn is closed).
-        // The actual agent continuation requires the UI to re-attach; we at least
-        // ensure the session is loadable and log the intent.
+        // We re-create the session with its persisted seed — DSH's session
+        // persistence treats it as a resume (log is re-read, interrupted turn
+        // is closed). If an agent can be re-attached, we try via ctx.agents.
         for (const id of interrupted) {
           try {
-            // The session id in DSH is the last part after "/" — group is cwd hash
             const sessionId = id.split('/').pop()!
-            // Check if already live
-            const existing = ctx.sessions?.get?.(sessionId)
-            if (existing) {
+            const exists = ctx.sessions?.get?.(sessionId)
+            if (exists) {
               ctx.logger?.info?.(`[supervisor] auto-resume skip ${id} — already live`)
               continue
             }
-            // Try to load persisted state via sessionPersistence if available
-            const persistence = ctx.get?.('sessionPersistence') ?? (ctx as any).sessionPersistence
+            const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
             if (persistence?.load) {
               try {
                 const loaded = await persistence.load(sessionId)
                 if (loaded?.events?.length) {
-                  ctx.logger?.info?.(`[supervisor] auto-resume: session ${id} has ${loaded.events.length} events, would resume (requires agent re-attach)`)
-                  // We do not auto-create the session here to avoid duplicate
-                  // agent loops — the UI will re-create on next open. Log only.
+                  // Try to re-create the session inside DSH host so it becomes
+                  // visible without requiring the user to re-open the tab.
+                  try {
+                    const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
+                    const sid = SessionId ? SessionId(sessionId) : sessionId
+                    const created = ctx.sessions?.create?.(sid, { seed: loaded.events, meta: loaded.meta ?? {} })
+                    if (created) ctx.logger?.info?.(`[supervisor] auto-resume: re-created session ${id} with ${loaded.events.length} events`)
+                    // Best-effort: try to re-attach an agent if the preset is known
+                    try {
+                      const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
+                      if (agents?.create && loaded.meta?.preset) {
+                        await agents.create({ sessionId: sid, preset: loaded.meta.preset }).catch(() => {})
+                        ctx.logger?.info?.(`[supervisor] auto-resume: agent re-attached for ${id}`)
+                      }
+                    } catch {}
+                  } catch (e: any) {
+                    ctx.logger?.info?.(`[supervisor] auto-resume: session ${id} has ${loaded.events.length} events, would resume (create failed: ${e?.message ?? String(e)})`)
+                  }
                 }
               } catch (e: any) {
                 ctx.logger?.warn?.(`[supervisor] auto-resume load failed ${id}: ${e?.message ?? String(e)}`)
