@@ -13,7 +13,7 @@ export interface FindInterruptedOpts {
 }
 
 /**
- * Read the last ~20 lines of one session's raw log, applying the mtime
+ * Read the last ~100 lines of one session's raw log, applying the mtime
  * pre-filter before any (potentially expensive) zstd decompression: a
  * session log's mtime only advances when something is appended to it, so a
  * file older than `sinceMs` cannot contain anything within the window.
@@ -36,12 +36,12 @@ async function readSessionTailLines(zstdPath: string, jsonlPath: string, sinceMs
   }
   if (fs.existsSync(zstdPath)) {
     const { execSync } = await import('node:child_process')
-    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | tail -20`, { encoding: 'utf-8' })
+    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | tail -100`, { encoding: 'utf-8' })
     return out.split('\n').filter(Boolean)
   }
   if (fs.existsSync(jsonlPath)) {
     const content = fs.readFileSync(jsonlPath, 'utf-8')
-    return content.trim().split('\n').slice(-20)
+    return content.trim().split('\n').slice(-100)
   }
   return undefined
 }
