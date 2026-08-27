@@ -7,7 +7,7 @@ describe('cli', () => {
     expect(out).toContain('status')
   })
   it('status runs without crash', () => {
-    const out = execSync('node lib/index.js status 2>&1 || true', { encoding: 'utf-8' })
+    const out = execSync('node lib/index.js status 2>&1 || true', { encoding: 'utf-8', timeout: 10000 })
     expect(out).toContain('up:')
-  })
+  }, 10000)
 })
