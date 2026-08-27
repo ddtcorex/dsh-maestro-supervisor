@@ -103,9 +103,9 @@ export async function runAutoResume(
     resumeInterrupted?: typeof resumeInterrupted
   } = {}
 ): Promise<void> {
-  const doFind = opts.findInterrupted ?? defaultFindInterrupted
-  const doResume = opts.resumeInterrupted ?? resumeInterrupted
   try {
+    const doFind = opts.findInterrupted ?? defaultFindInterrupted
+    const doResume = opts.resumeInterrupted ?? resumeInterrupted
     if (!getAutoResumeEnabled()) {
       ctx.logger?.info?.('[supervisor] auto-resume disabled — skip')
       return
@@ -119,7 +119,9 @@ export async function runAutoResume(
     ctx.logger?.info?.(`[supervisor] auto-resume: ${interrupted.length}/${scanned} interrupted within ${withinMs}ms: ${interrupted.slice(0, 3).join(', ')}`)
     await doResume(ctx, interrupted)
   } catch (e: any) {
-    ctx.logger?.warn?.(`[supervisor] auto-resume error: ${e?.message ?? String(e)}`)
+    try {
+      ctx.logger?.warn?.(`[supervisor] auto-resume error: ${e?.message ?? String(e)}`)
+    } catch {}
   }
 }
 

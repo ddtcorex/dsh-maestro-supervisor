@@ -70,4 +70,13 @@ describe('runAutoResume', () => {
     await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy })
     expect(resumeSpy).not.toHaveBeenCalled()
   })
+
+  it('does not throw when opts is null (explicitly passed, not undefined)', async () => {
+    const ctx = makeCtx()
+    // Passing null instead of undefined to test that property access doesn't escape the try block
+    await expect(
+      runAutoResume(ctx, null as any)
+    ).resolves.toBeUndefined()
+    expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
 })
