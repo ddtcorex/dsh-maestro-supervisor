@@ -28,6 +28,15 @@ node packages/dsh-maestro-supervisor/lib/index.js daemon
 
 Reports: `~/.dsh/.supervisor/reports/report-<ts>.md`, LKG: `~/.dsh/.supervisor/lkg/<ts>/`, failed: `~/.dsh/.supervisor/failed/<ts>/`
 
+## Telegram
+
+`src/host/notifier.ts` is loose by default: tries `import('@ddtcorex/dsh-maestro-notifier')`, then `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` env, then `console.log`. No hard dependency, daemon never blocks on Telegram.
+
+- **Enable:** `systemctl --user edit dsh-web-supervisor` → uncomment `Environment=TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `systemd/dsh-web-supervisor.service.template` → `systemctl --user daemon-reload && systemctl --user restart dsh-web-supervisor`.
+- **Hard mode (optional):** `package.json` add `"@ddtcorex/dsh-maestro-notifier": "workspace:^0.1.0"` + `pnpm-workspace.yaml` `packages: ["../dsh-maestro-notifier"]` — then `pnpm install` links it and every `notify()` hits the hard import.
+
+See `AGENTS.md` §Dependency patterns for details and for interdependent Cordis plugins (A ↔ B) — never mutual `inject`, use shared lib C / one-way + events / isolate+RPC.
+
 ## Integration test
 
 ```bash
