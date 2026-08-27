@@ -58,14 +58,31 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   }
 
   let logError: string | undefined
-  const lowerLog = logContent.toLowerCase()
-  for (const pat of ERROR_PATTERNS) {
-    if (lowerLog.includes(pat.toLowerCase())) {
-      // extract line containing pattern (case-insensitive)
-      const line = logContent.split('\n').find(l => l.toLowerCase().includes(pat.toLowerCase())) ?? pat
-      logError = line.trim().slice(0, 500)
-      break
+  // Find most recent error line (not first) and ignore stale errors that are
+  // followed by a successful boot (log tail is append-only, old EADDRINUSE stays forever).
+  // We check last occurrence and ensure no "dsh web: http" success after it.
+  const lines = logContent.split('\n')
+  const lowerLines = lines.map(l => l.toLowerCase())
+  let lastErrorIdx = -1
+  let matchedLine = ''
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const lower = lowerLines[i]
+    for (const pat of ERROR_PATTERNS) {
+      if (lower.includes(pat.toLowerCase())) {
+        lastErrorIdx = i
+        matchedLine = lines[i].trim().slice(0, 500)
+        break
+      }
     }
+    if (lastErrorIdx !== -1) break
+  }
+  if (lastErrorIdx !== -1) {
+    // If a successful boot line appears after the last error, error is stale (already recovered)
+    let hasSuccessAfter = false
+    for (let i = lastErrorIdx + 1; i < lines.length; i++) {
+      if (lowerLines[i].includes('dsh web: http')) { hasSuccessAfter = true; break }
+    }
+    if (!hasSuccessAfter) logError = matchedLine
   }
 
   // Distinguish FULL (http !=200) vs DEGRADED (http 200 but log has plugin error)
@@ -79,6 +96,19 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     }
   }
   if (logError) {
+    // EADDRINUSE is fatal even with http 200 — old process still holds 3080/3000
+    // and new start failed; treat as FULL down so supervisor kills + restarts.
+    const lowerErr = logError.toLowerCase()
+    const isFatalPortError = lowerErr.includes('eaddrinuse') || lowerErr.includes('address already in use')
+    if (isFatalPortError) {
+      return {
+        up: false,
+        httpCode,
+        error: logError,
+        degraded: false,
+        logTail: logContent.slice(-5000),
+      }
+    }
     // http 200 but log error → DEGRADED (isolatable), not FULL
     if (httpCode === 200) {
       return {

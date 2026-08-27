@@ -31,7 +31,7 @@ The package declares `dsh.client` (`platform: web`, `inject: ["@deepseek-ai/dsh-
 dsh plugin --profile web add @ddtcorex/dsh-maestro-supervisor
 # or manually:
 # edit ~/.dsh/profiles/web/package.json:
-# "@ddtcorex/dsh-maestro-supervisor": "link:/home/kai/Work/htdocs/maestro-harness/packages/dsh-maestro-supervisor"
+# "@ddtcorex/dsh-maestro-supervisor": "link:<workspace-root>/packages/dsh-maestro-supervisor"
 pnpm --dir ~/.dsh/profiles/web install
 ls -l ~/.dsh/profiles/web/node_modules/@ddtcorex/dsh-maestro-supervisor  # → .../packages/dsh-maestro-supervisor
 ```
@@ -113,8 +113,8 @@ curl -s http://127.0.0.1:3080/dsh-maestro-supervisor-resume/scan -X POST \
 # Resume (re-attaches agent + followup continue, recovers provider/model)
 curl -s http://127.0.0.1:3080/dsh-maestro-supervisor-resume/resume -X POST \
   -H 'content-type: application/json' \
-  -d '{"type":"client-request","rpcId":"r2","method":"resume","payload":{"ids":["--home-kai-Work-htdocs-maestro-harness--/session-abc"]}}'
-# → {"type":"server-response","rpcId":"r2","result":{"ok":true,"value":{"resumed":["--home-kai-Work-htdocs-maestro-harness--/session-abc"]}}}
+  -d '{"type":"client-request","rpcId":"r2","method":"resume","payload":{"ids":["--example-project--/session-abc"]}}'
+# → {"type":"server-response","rpcId":"r2","result":{"ok":true,"value":{"resumed":["--example-project--/session-abc"]}}}
 # or {"ok":false,"error":{"code":"bad-request","message":"resume requires at least one session id"}}
 ```
 
@@ -191,6 +191,6 @@ Hard mode (optional): `package.json` add `"@ddtcorex/dsh-maestro-notifier": "wor
 
 ## See Also
 
-- Spec: `docs/specs/2026-08-27-dsh-web-resilience-design.md`
+- Spec: `<workspace-root>/docs/specs/2026-08-27-dsh-web-resilience-design.md`
 - Skill: `maestro-skills/skills/dsh-safe-web-update/` (`restart-dsh-web.sh` with `dry_boot_and_verify()` and `--auto`)
 - Client bundling: `dsh-maestro-mobile` (`scripts/build-client.mjs` pattern)
