@@ -11,7 +11,7 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
 
-export const inject = ['sessions', 'connection'] as const
+export const inject = ['sessions', 'agents', 'connection'] as const
 
 export interface SupervisorPluginConfig {
   autoResumeWithin?: number | string // in MINUTES if number, or "5m"/"30s"/"1h" string
@@ -154,59 +154,78 @@ export async function runAutoResume(
   }
 }
 
-export async function resumeInterrupted(ctx: any, ids: string[]): Promise<void> {
+export async function resumeInterrupted(ctx: any, ids: string[]): Promise<string[]> {
+  const resumed: string[] = []
   for (const id of ids) {
     try {
       const sessionId = id.split('/').pop()!
-      const exists = ctx.sessions?.get?.(sessionId)
-      if (exists) {
-        ctx.logger?.info?.(`[supervisor] auto-resume skip ${id} — already live`)
-        continue
-      }
-      const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
-      if (persistence?.load) {
+      const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
+      let agent = agents?.get?.(sessionId)
+      if (agent === undefined) {
+        const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
+        const sid = SessionId ? SessionId(sessionId) : sessionId
+        const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
+        let agentOptions: { provider: string; model: string } | undefined
         try {
-          const loaded = await persistence.load(sessionId)
-          if (loaded?.events?.length) {
-            try {
-              const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
-              const sid = SessionId ? SessionId(sessionId) : sessionId
-              const created = ctx.sessions?.create?.(sid, { seed: loaded.events, meta: loaded.meta ?? {} })
-              if (created) ctx.logger?.info?.(`[supervisor] auto-resume: re-created session ${id} with ${loaded.events.length} events`)
-              try {
-                const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
-                if (agents?.create && loaded.meta?.agentPreset) {
-                  const handle = await agents.create({ sessionId: sid, meta: { agentPreset: loaded.meta.agentPreset } })
-                  ctx.logger?.info?.(`[supervisor] auto-resume: agent re-attached for ${id}`)
-                  try {
-                    const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
-                      createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),
-                    }))
-                    handle?.agent?.followup?.(createUserMessage({
-                      content: [{ type: 'text', text: 'continue' }],
-                      source: { kind: 'user' },
-                    }))
-                    ctx.logger?.info?.(`[supervisor] auto-resume: sent continue trigger for ${id}`)
-                  } catch (e: any) {
-                    ctx.logger?.warn?.(`[supervisor] auto-resume: continue trigger failed for ${id}: ${e?.message ?? String(e)}`)
-                  }
-                }
-              } catch (e: any) {
-                ctx.logger?.warn?.(`[supervisor] auto-resume: agent create failed for ${id}: ${e?.message ?? String(e)}`)
-              }
-            } catch (e: any) {
-              ctx.logger?.info?.(`[supervisor] auto-resume: session ${id} has ${loaded.events.length} events, would resume (create failed: ${e?.message ?? String(e)})`)
-            }
+          const loaded = await persistence?.load?.(sessionId)
+          const context = Array.isArray(loaded?.events)
+            ? [...loaded.events].reverse().find((event: any) => event?.type === 'request/context')?.data
+            : undefined
+          if (typeof context?.provider === 'string' && typeof context?.model === 'string') {
+            agentOptions = { provider: context.provider, model: context.model }
           }
         } catch (e: any) {
-          ctx.logger?.warn?.(`[supervisor] auto-resume load failed ${id}: ${e?.message ?? String(e)}`)
+          ctx.logger?.warn?.(`[supervisor] auto-resume: could not recover route for ${id}: ${e?.message ?? String(e)}`)
         }
-      } else {
-        ctx.logger?.info?.(`[supervisor] auto-resume: ${id} — no sessionPersistence, skip in-process resume (daemon will notify)`)
+        const handle = await agents?.resume?.({
+          resumeSessionId: sid,
+          ...(agentOptions === undefined ? {} : { agentOptions }),
+        })
+        agent = handle?.agent
+        if (agent !== undefined) ctx.logger?.info?.(`[supervisor] auto-resume: re-attached agent for ${id}`)
       }
+      if (typeof agent?.followup !== 'function') {
+        ctx.logger?.warn?.(`[supervisor] auto-resume: no live agent available for ${id}`)
+        continue
+      }
+      const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
+        createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),
+      }))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue' }],
+        source: { kind: 'user' },
+      }))
+      resumed.push(id)
+      ctx.logger?.info?.(`[supervisor] auto-resume: sent continue trigger for ${id}`)
     } catch (e: any) {
       ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
     }
+  }
+  return resumed
+}
+
+export function createResumeRpcHandler(
+  ctx: any,
+  opts: { resumeInterrupted?: typeof resumeInterrupted; config?: SupervisorPluginConfig } = {},
+) {
+  const resume = opts.resumeInterrupted ?? resumeInterrupted
+  return async (endpoint: string, payload: unknown, _signal: AbortSignal) => {
+    if (endpoint === 'scan') {
+      const withinMs = typeof (payload as any)?.withinMs === 'number'
+        ? (payload as any).withinMs
+        : getResumeWithinMs(opts.config)
+      return { ok: true, value: await defaultFindInterrupted(undefined, { withinMs }) }
+    }
+    if (endpoint !== 'resume') {
+      return { ok: false, error: { code: 'bad-request', message: `unsupported endpoint: ${endpoint}` } }
+    }
+    const ids = Array.isArray((payload as any)?.ids)
+      ? (payload as any).ids.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+      : []
+    if (!ids.length) {
+      return { ok: false, error: { code: 'bad-request', message: 'resume requires at least one session id' } }
+    }
+    return { ok: true, value: { resumed: await resume(ctx, ids) } }
   }
 }
 
@@ -233,10 +252,7 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
         if (conn?.rpc?.handle) {
           disposeRpc = conn.rpc.handle(
             '/dsh-maestro-supervisor-resume',
-            async (_endpoint: string, payload: any) => {
-              const within = payload?.withinMs ?? getResumeWithinMs(config)
-              return await defaultFindInterrupted(undefined, { withinMs: within })
-            },
+            createResumeRpcHandler(ctx, { config }),
             { authority: 'loopback' }
           )
         }

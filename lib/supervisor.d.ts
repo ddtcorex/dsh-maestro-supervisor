@@ -33,7 +33,13 @@ export interface SupervisorDeps {
         scanned: number;
         interrupted: string[];
     }>;
+    resumeSessions?: (ids: string[]) => Promise<{
+        resumed: string[];
+    }>;
 }
+export declare function resumeViaRpc(ids: string[], fetchFn?: (url: string, init: RequestInit) => Promise<Response>): Promise<{
+    resumed: string[];
+}>;
 export declare class Supervisor {
     private deps;
     private lastRollback;
@@ -44,6 +50,7 @@ export declare class Supervisor {
     constructor(deps: SupervisorDeps);
     private getRunDebugAgent;
     private getFindInterrupted;
+    private getResumeSessions;
     private getAutoResumeEnabled;
     private getResumeWithinMs;
     private findInterruptedRecent;

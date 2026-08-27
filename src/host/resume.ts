@@ -13,7 +13,7 @@ export interface FindInterruptedOpts {
 }
 
 /**
- * Read the last ~20 lines of one session's raw log, applying the mtime
+ * Read the last ~100 lines of one session's raw log, applying the mtime
  * pre-filter before any (potentially expensive) zstd decompression: a
  * session log's mtime only advances when something is appended to it, so a
  * file older than `sinceMs` cannot contain anything within the window.
@@ -36,12 +36,12 @@ async function readSessionTailLines(zstdPath: string, jsonlPath: string, sinceMs
   }
   if (fs.existsSync(zstdPath)) {
     const { execSync } = await import('node:child_process')
-    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | tail -20`, { encoding: 'utf-8' })
+    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | tail -100`, { encoding: 'utf-8' })
     return out.split('\n').filter(Boolean)
   }
   if (fs.existsSync(jsonlPath)) {
     const content = fs.readFileSync(jsonlPath, 'utf-8')
-    return content.trim().split('\n').slice(-20)
+    return content.trim().split('\n').slice(-100)
   }
   return undefined
 }
@@ -94,8 +94,39 @@ export async function findInterrupted(dshHome?: string, opts?: FindInterruptedOp
 }
 
 /**
+ * Read the entire log for a recent session (mtime within window) to find an
+ * open turn that may be far from the tail. Used only by
+ * {@link findDanglingOpenTurns}, which must see the last `turn/start`
+ * even when the file is 1906 lines and the open turn is at line 2 (subagent
+ * `b6487e33` had its only `turn/start` at seq 6, missed by `tail -100`).
+ * The mtime pre-filter ensures this full decompression runs only for
+ * recent sessions (within 5m, typically 1-2 files), not for all 425.
+ */
+async function readSessionAllLines(zstdPath: string, jsonlPath: string, sinceMs: number | undefined): Promise<string[] | undefined> {
+  if (sinceMs !== undefined) {
+    try {
+      const statPath = fs.existsSync(zstdPath) ? zstdPath : (fs.existsSync(jsonlPath) ? jsonlPath : undefined)
+      if (statPath) {
+        const mtimeMs = fs.statSync(statPath).mtimeMs
+        if (mtimeMs < sinceMs) return undefined
+      }
+    } catch {}
+  }
+  if (fs.existsSync(zstdPath)) {
+    const { execSync } = await import('node:child_process')
+    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null`, { encoding: 'utf-8' })
+    return out.split('\n').filter(Boolean)
+  }
+  if (fs.existsSync(jsonlPath)) {
+    const content = fs.readFileSync(jsonlPath, 'utf-8')
+    return content.trim().split('\n').filter(Boolean)
+  }
+  return undefined
+}
+
+/**
  * Detect sessions whose raw log ends with a `turn/start` that has no
- * matching `turn/end` anywhere later in the scanned tail — a dangling open
+ * matching `turn/end` anywhere later in the scanned log — a dangling open
  * turn. Unlike {@link findInterrupted}, this needs no prior `persistence.load()`
  * call to have already synthesized a `turn/end interrupted` closer (DSH core
  * only writes that closer when something loads/prepares the specific
@@ -126,7 +157,7 @@ export async function findDanglingOpenTurns(dshHome?: string, opts?: FindInterru
         const zstdPath = path.join(groupPath, s.name, 'session.jsonl.zstd')
         const jsonlPath = path.join(groupPath, s.name, 'session.jsonl')
         try {
-          const lines = await readSessionTailLines(zstdPath, jsonlPath, sinceMs)
+          const lines = await readSessionAllLines(zstdPath, jsonlPath, sinceMs)
           if (lines === undefined) continue
           let openTurn: number | undefined
           let openTurnTime: number | undefined

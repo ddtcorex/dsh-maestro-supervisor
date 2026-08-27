@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resumeInterrupted, runAutoResume, apply } from '../src/host/plugin.js'
+import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, inject } from '../src/host/plugin.js'
 
 function makeCtx(overrides: Record<string, any> = {}) {
   const logs: string[] = []
@@ -16,21 +16,25 @@ function makeCtx(overrides: Record<string, any> = {}) {
 }
 
 describe('resumeInterrupted', () => {
-  it('skips a session that is already live', async () => {
-    const ctx = makeCtx({ sessions: { get: () => ({ status: 'active' }) } })
-    await resumeInterrupted(ctx, ['proj/abc-123'])
-    expect(ctx._logs.some((l: string) => l.includes('already live'))).toBe(true)
+  it('sends continue to an already live agent instead of skipping its session', async () => {
+    const followup = vi.fn()
+    const ctx = makeCtx({
+      sessions: { get: () => ({ status: 'active' }) },
+      agents: { get: () => ({ followup }) },
+    })
+    await expect(resumeInterrupted(ctx, ['proj/abc-123'])).resolves.toEqual(['proj/abc-123'])
+    expect(followup).toHaveBeenCalledTimes(1)
   })
 
   it('does nothing for a session with no sessionPersistence available', async () => {
     const ctx = makeCtx()
-    await expect(resumeInterrupted(ctx, ['proj/abc-123'])).resolves.toBeUndefined()
+    await expect(resumeInterrupted(ctx, ['proj/abc-123'])).resolves.toEqual([])
   })
 
   it('continues to the next id when one session throws', async () => {
     const throwingPersistence = { load: async () => { throw new Error('disk error') } }
     const ctx = makeCtx({ sessionPersistence: throwingPersistence })
-    await expect(resumeInterrupted(ctx, ['proj/bad-1', 'proj/bad-2'])).resolves.toBeUndefined()
+    await expect(resumeInterrupted(ctx, ['proj/bad-1', 'proj/bad-2'])).resolves.toEqual([])
     expect(ctx._logs.filter((l: string) => l.includes('warn:')).length).toBeGreaterThanOrEqual(2)
   })
 
@@ -42,24 +46,38 @@ describe('resumeInterrupted', () => {
         meta: { agentPreset: 'default' },
       }),
     }
-    const createAgent = vi.fn(async () => ({ agent: { followup } }))
+    const resumeAgent = vi.fn(async () => ({ agent: { followup } }))
     const ctx = makeCtx({
       sessionPersistence: persistence,
       sessions: { get: () => undefined, create: () => true },
-      agents: { create: createAgent },
+      agents: { get: () => undefined, resume: resumeAgent },
     })
     await resumeInterrupted(ctx, ['proj/session-abc'])
-    expect(createAgent).toHaveBeenCalledTimes(1)
-    // Real DSH core's CreateAgentOptions has no top-level `preset` field — the
-    // preset lives nested at `meta.agentPreset`. Assert the real shape so a
-    // future field-name regression fails this test instead of silently
-    // passing with agents.create() receiving a field it ignores.
-    expect(createAgent).toHaveBeenCalledWith({ sessionId: 'session-abc', meta: { agentPreset: 'default' } })
+    expect(resumeAgent).toHaveBeenCalledTimes(1)
+    expect(resumeAgent).toHaveBeenCalledWith({ resumeSessionId: 'session-abc' })
     expect(followup).toHaveBeenCalledTimes(1)
     const sentMessage = followup.mock.calls[0][0]
     expect(sentMessage.content).toEqual([{ type: 'text', text: 'continue' }])
     expect(sentMessage.source).toEqual({ kind: 'user' })
     expect(ctx._logs.some((l: string) => l.includes('sent continue trigger'))).toBe(true)
+  })
+
+  it('restores the persisted provider and model when resuming an agent', async () => {
+    const resumeAgent = vi.fn(async () => ({ agent: { followup: vi.fn() } }))
+    const ctx = makeCtx({
+      sessionPersistence: {
+        load: async () => ({
+          events: [{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }],
+        }),
+      },
+      agents: { get: () => undefined, resume: resumeAgent },
+    })
+
+    await resumeInterrupted(ctx, ['proj/session-abc'])
+    expect(resumeAgent).toHaveBeenCalledWith({
+      resumeSessionId: 'session-abc',
+      agentOptions: { provider: 'example-provider', model: 'example-model' },
+    })
   })
 
   it('does not throw when the agent handle has no followup method', async () => {
@@ -72,9 +90,9 @@ describe('resumeInterrupted', () => {
     const ctx = makeCtx({
       sessionPersistence: persistence,
       sessions: { get: () => undefined, create: () => true },
-      agents: { create: async () => ({ agent: {} }) },
+      agents: { get: () => undefined, resume: async () => ({ agent: {} }) },
     })
-    await expect(resumeInterrupted(ctx, ['proj/session-abc'])).resolves.toBeUndefined()
+    await expect(resumeInterrupted(ctx, ['proj/session-abc'])).resolves.toEqual([])
   })
 
   it('does not throw when agents.create rejects', async () => {
@@ -87,9 +105,9 @@ describe('resumeInterrupted', () => {
     const ctx = makeCtx({
       sessionPersistence: persistence,
       sessions: { get: () => undefined, create: () => true },
-      agents: { create: async () => { throw new Error('factory unavailable') } },
+      agents: { get: () => undefined, resume: async () => { throw new Error('factory unavailable') } },
     })
-    await expect(resumeInterrupted(ctx, ['proj/session-abc'])).resolves.toBeUndefined()
+    await expect(resumeInterrupted(ctx, ['proj/session-abc'])).resolves.toEqual([])
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
   })
 })
@@ -240,6 +258,20 @@ function makeCtxWithEffect(overrides: Record<string, any> = {}) {
 }
 
 describe('apply', () => {
+  it('waits for the agent registry before starting auto-resume', () => {
+    expect(inject).toContain('agents')
+  })
+
+  it('routes a loopback resume request to the in-process resume handler', async () => {
+    const ctx = makeCtx()
+    const resume = vi.fn(async () => ['proj/session-a'])
+    const handler = createResumeRpcHandler(ctx, { resumeInterrupted: resume })
+
+    await expect(handler('resume', { ids: ['proj/session-a'] }, new AbortController().signal))
+      .resolves.toEqual({ ok: true, value: { resumed: ['proj/session-a'] } })
+    expect(resume).toHaveBeenCalledWith(ctx, ['proj/session-a'])
+  })
+
   it('registers the RPC handler exactly once on the corrected channel name', () => {
     const ctx = makeCtxWithEffect()
     apply(ctx)
