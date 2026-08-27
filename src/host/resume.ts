@@ -45,20 +45,11 @@ export async function findInterrupted(dshHome?: string, opts?: FindInterruptedOp
           let foundTime: number | undefined
           for (let i = lines.length - 1; i >= 0; i--) {
             const line = lines[i]
-            if (!line.toLowerCase().includes('interrupted')) continue
             try {
               const obj = JSON.parse(line)
               foundTime = typeof obj.time === 'number' ? obj.time : undefined
-              // also check nested reason
-              if (obj.data?.reason?.kind === 'interrupted' || line.toLowerCase().includes('interrupted')) {
-                found = true
-                break
-              }
-            } catch {
-              // if not JSON, fallback to string match
-              found = true
-              break
-            }
+              if (obj.type === 'turn/end' && obj.data?.reason?.kind === 'interrupted') { found = true; break }
+            } catch {}
           }
           if (!found) continue
           if (sinceMs !== undefined && foundTime !== undefined) {
