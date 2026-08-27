@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resumeInterrupted, runAutoResume } from '../src/host/plugin.js'
+import { resumeInterrupted, runAutoResume, apply } from '../src/host/plugin.js'
 
 function makeCtx(overrides: Record<string, any> = {}) {
   const logs: string[] = []
@@ -78,5 +78,58 @@ describe('runAutoResume', () => {
       runAutoResume(ctx, null as any)
     ).resolves.toBeUndefined()
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
+})
+
+function makeCtxWithEffect(overrides: Record<string, any> = {}) {
+  const logs: string[] = []
+  const rpcHandlers: { channel: string; opts: any }[] = []
+  return {
+    logger: { info: (m: string) => logs.push(`info:${m}`), warn: (m: string) => logs.push(`warn:${m}`) },
+    effect: (fn: any) => fn(),
+    connection: {
+      rpc: {
+        handle: (channel: string, _handler: any, opts?: any) => {
+          rpcHandlers.push({ channel, opts })
+          return () => {}
+        },
+      },
+    },
+    sessions: { get: () => undefined },
+    get: () => undefined,
+    _logs: logs,
+    _rpcHandlers: rpcHandlers,
+    ...overrides,
+  }
+}
+
+describe('apply', () => {
+  it('registers the RPC handler exactly once on the corrected channel name', () => {
+    const ctx = makeCtxWithEffect()
+    apply(ctx)
+    expect(ctx._rpcHandlers).toHaveLength(1)
+    expect(ctx._rpcHandlers[0].channel).toBe('/dsh-maestro-supervisor-resume')
+    expect(ctx._rpcHandlers[0].channel).toMatch(/^\/[A-Za-z0-9._~-]+$/)
+  })
+
+  it('does not throw when ctx.connection.rpc.handle itself throws', () => {
+    const ctx = makeCtxWithEffect({
+      connection: { rpc: { handle: () => { throw new Error('bad channel') } } },
+    })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('does not throw when ctx.connection is missing entirely', () => {
+    const ctx = makeCtxWithEffect({ connection: undefined })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('returns a disposer from the effect that clears the timer and unregisters RPC without throwing', () => {
+    const ctx = makeCtxWithEffect()
+    let disposer: any
+    ctx.effect = (fn: any) => { disposer = fn(); return disposer }
+    apply(ctx)
+    expect(typeof disposer).toBe('function')
+    expect(() => disposer()).not.toThrow()
   })
 })
