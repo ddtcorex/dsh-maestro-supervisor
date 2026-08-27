@@ -19,6 +19,17 @@ export interface SupervisorDeps {
     intervalMs?: number;
     debounceMs?: number;
     getTime?: () => number;
+    runDebugAgent?: (opts: {
+        reportPath: string;
+        health: HealthState;
+    }) => Promise<{
+        fixed: boolean;
+        reason: string;
+    }>;
+    findInterrupted?: () => Promise<{
+        scanned: number;
+        interrupted: string[];
+    }>;
 }
 export declare class Supervisor {
     private deps;
@@ -28,6 +39,9 @@ export declare class Supervisor {
     private lastDegradedNotify;
     private timer;
     constructor(deps: SupervisorDeps);
+    private getRunDebugAgent;
+    private getFindInterrupted;
+    private handleDebugResult;
     tick(): Promise<void>;
     start(): void;
     stop(): void;
