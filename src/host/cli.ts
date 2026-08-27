@@ -91,17 +91,46 @@ Commands:
         return writeReport({ reportsRoot, ts, health, gitDiff: diff, logTail: tail, action })
       },
       rollback: async () => {
-        // Find latest LKG and restore
+        const { execSync } = await import('node:child_process')
         const entries = fs.existsSync(lkgRoot) ? fs.readdirSync(lkgRoot).sort() : []
         if (!entries.length) throw new Error('no LKG to rollback to')
-        const latest = entries[entries.length - 1]
-        const src = path.join(lkgRoot, latest)
-        // naive restore: copy files back
+        // Try newest to oldest (up to 3) to find a clean LKG for plugin failures
+        // Extract failing plugin from current log tail if possible
+        let failingPlugin: string | undefined
+        try {
+          const tail = fs.readFileSync(path.join(os.homedir(), '.dsh/dsh-web.log'), 'utf8').slice(-5000)
+          const m = tail.match(/@ddtcorex\/dsh-maestro-[a-z0-9_-]+/i) ?? tail.match(/dsh-maestro-[a-z0-9_-]+/i)
+          if (m) failingPlugin = m[0].replace(/^@ddtcorex\//, '')
+        } catch {}
+        const candidates = [...entries].reverse().slice(0, 3)
+        let chosen: string | undefined
+        for (const cand of candidates) {
+          if (!failingPlugin) { chosen = cand; break }
+          try {
+            const pkgPath = path.join(lkgRoot, cand, 'profiles/web/package.json')
+            if (!fs.existsSync(pkgPath)) { chosen = cand; break }
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+            const bundles: string[] = pkg?.dsh?.profile?.bundles ?? []
+            const deps = pkg?.dependencies ?? {}
+            const hasFailing = bundles.some((b: string) => b.includes(failingPlugin!)) || Object.keys(deps).some(k => k.includes(failingPlugin!))
+            if (!hasFailing) { chosen = cand; break }
+            console.log(`[supervisor] skipping LKG ${cand} still contains failing plugin ${failingPlugin}`)
+          } catch { chosen = cand; break }
+        }
+        const target = chosen ?? entries[entries.length - 1]
+        const src = path.join(lkgRoot, target)
         for (const entry of fs.readdirSync(src)) {
           if (entry === 'manifest.json') continue
           fs.cpSync(path.join(src, entry), path.join(dshHome, entry), { recursive: true, force: true })
         }
-        console.log(`[supervisor] rolled back to ${latest}`)
+        console.log(`[supervisor] rolled back to ${target}${failingPlugin ? ` (avoiding ${failingPlugin})` : ''}`)
+        // Reconcile node_modules from restored package.json (critical for link: deps)
+        try {
+          execSync('pnpm --dir ~/.dsh/profiles/web install --silent', { timeout: 30000, stdio: 'pipe' })
+          console.log('[supervisor] pnpm install reconciled profiles/web')
+        } catch (e: any) {
+          console.log(`[supervisor] pnpm install failed: ${e?.message ?? String(e)}`)
+        }
       },
       restartWeb: async () => {
         const { execSync } = await import('node:child_process')
