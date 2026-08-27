@@ -17,6 +17,9 @@ const ERROR_PATTERNS = [
   'ERR_MODULE_NOT_FOUND',
   'assertChannel',
   'unhandledRejection',
+  'SyntaxError',
+  'JSON',
+  'corrupted',
   'Cannot find module',
   'Failed to load',
 ]
