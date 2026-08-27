@@ -6,7 +6,7 @@
 
 Supervisor daemon for DSH Web resilience — auto-detects crashes, rollbacks to last-known-good (LKG), and reports for the next session. Runs **outside** the `pnpm → sh → node` tree so it survives tree crashes.
 
-Names by boundary: npm package = `@ddtcorex/dsh-maestro-supervisor`; binary = `dsh-web-supervisor`. Not a Cordis plugin — standalone daemon (Phase 1 Guard & Report of `docs/specs/2026-08-27-dsh-web-resilience-design.md`).
+Names by boundary: npm package = `@ddtcorex/dsh-maestro-supervisor`; binary = `dsh-web-supervisor`. The daemon itself is not a Cordis plugin — standalone daemon (Phase 1 Guard & Report of `docs/specs/2026-08-27-dsh-web-resilience-design.md`). The package also ships one deliberate in-tree Cordis plugin (auto-resume) as a permitted exception — see `## Conventions` below for the two non-negotiable conditions that exception is held to.
 
 Part of the Maestro Harness suite. See spec for Phase 2 (loader isolation) and Phase 3 (autonomous debug agent + Telegram + session resume).
 
@@ -14,15 +14,20 @@ Part of the Maestro Harness suite. See spec for Phase 2 (loader isolation) and P
 
 - `src/host/index.ts` — CLI entry (`daemon|status|logs|rollback`)
 - `src/host/cli.ts` — argument parsing and command dispatch
+- `src/host/bin.ts` — daemon binary entry point (`dsh-web-supervisor`), wires `Supervisor` and starts the poll loop
+- `src/host/paths.ts` — shared `~/.dsh/.supervisor/**` path helpers (LKG, failed, reports, lock, config)
 - `src/host/supervisor.ts` — `Supervisor` class: poll loop, debounce (60s), rolling guard, LKG/failed/report/rollback/notify orchestration
 - `src/host/snapshot.ts` — LKG store: `writeLKG`, `verifyLKG` (sha256), `rotateLKG(3)`, `writeFailed`; `df` guard and `manifest.json`
 - `src/host/health-poller.ts` — `pollHealth()` with injectable `fetch/psAlive/logTail`; detects `ERR_MODULE_NOT_FOUND` / `assertChannel` / `unhandledRejection`
 - `src/host/report.ts` — `writeReport()` → `~/.dsh/.supervisor/reports/report-<ts>.md` (health + git diff + log tail)
 - `src/host/notifier.ts` — Telegram bridge via `dsh-maestro-notifier` (swallow errors, never block rollback)
+- `src/host/debug-agent.ts` — Phase 3 autonomous debug agent, spawned on-demand only after an LKG rollback
+- `src/host/resume.ts` — `findInterrupted()`: scans `~/.dsh/sessions/**` for sessions whose log ends in a `turn/end`+`interrupted` event, with an mtime pre-filter to skip decompressing `.zstd` logs outside the requested time window
+- `src/host/plugin.ts` — in-tree Cordis plugin: `apply()`, `runAutoResume()`, `resumeInterrupted()` — the one deliberate exception to "daemon stays outside the tree" (see `## Conventions`)
 - `lib/` — committed build output. Generated; do not hand-edit.
 - `systemd/dsh-web-supervisor.service.template` — systemd user unit (`Restart=always`)
 - `scripts/install-systemd.sh` — installs unit to `~/.config/systemd/user/`
-- `tests/*.test.ts` — vitest suites (7 files, 17 tests + 1 integration skipped unless `DSH_INTEGRATION=1`)
+- `tests/*.test.ts` — vitest suites (13 files, 66 tests + 1 integration skipped unless `DSH_INTEGRATION=1`)
 
 ## Development
 
