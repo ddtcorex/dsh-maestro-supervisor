@@ -21,13 +21,25 @@ function walkFiles(dir: string, base: string = dir): string[] {
 }
 
 export async function writeLKG(dshHome: string, lkgRoot: string): Promise<{ ts: string; manifest: Manifest }> {
+  // Dedupe: skip snapshot if current state identical to latest LKG (prevents 5-min unconditional growth)
+  try {
+    if (await isDuplicateLKG(dshHome, lkgRoot)) {
+      const entries = fs.readdirSync(lkgRoot).filter((n: string) => {
+        try { return fs.statSync(path.join(lkgRoot, n)).isDirectory() } catch { return false }
+      }).sort()
+      const latest = entries[entries.length - 1]
+      const manifestPath = path.join(lkgRoot, latest, 'manifest.json')
+      const manifest: Manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
+      return { ts: latest, manifest }
+    }
+  } catch {}
+
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const dest = path.join(lkgRoot, ts)
   fs.mkdirSync(dest, { recursive: true })
 
-  // Copy DSH home contents (if exists, copy recursively)
+  // Copy DSH home contents (if exists, copy recursively) — skip .supervisor to avoid recursion
   if (fs.existsSync(dshHome)) {
-    // Use cpSync if available
     for (const entry of fs.readdirSync(dshHome)) {
       if (entry === '.supervisor') continue;
       const src = path.join(dshHome, entry)
@@ -44,7 +56,90 @@ export async function writeLKG(dshHome: string, lkgRoot: string): Promise<{ ts: 
       .map(f => ({ path: f, sha256: sha256File(path.join(dest, f)) })),
   }
   fs.writeFileSync(path.join(dest, 'manifest.json'), JSON.stringify(manifest, null, 2))
+
+  // Retention: keep only 3 most recent, plus age (7d) and size (5GB) caps — prevents unbounded 40GB+ growth
+  await rotateLKG(lkgRoot, 3).catch(() => {})
+  await pruneByAge(lkgRoot, 7 * 24 * 60 * 60 * 1000).catch(() => {})
+  await pruneBySize(lkgRoot, 5 * 1024 * 1024 * 1024).catch(() => {})
+
   return { ts, manifest }
+}
+
+export async function pruneByAge(root: string, maxAgeMs: number): Promise<void> {
+  if (!fs.existsSync(root)) return
+  const now = Date.now()
+  const entries = fs.readdirSync(root).filter((n: string) => {
+    try { return fs.statSync(path.join(root, n)).isDirectory() } catch { return false }
+  })
+  for (const name of entries) {
+    try {
+      const tsStr = name.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d+)Z$/, '$1-$2-$3T$4:$5:$6.$7Z')
+      const ts = Date.parse(tsStr)
+      if (!isNaN(ts) && now - ts > maxAgeMs) {
+        fs.rmSync(path.join(root, name), { recursive: true, force: true })
+      }
+    } catch {}
+  }
+}
+
+export async function pruneBySize(root: string, maxBytes: number): Promise<void> {
+  if (!fs.existsSync(root)) return
+  const entries = fs.readdirSync(root).filter((n: string) => {
+    try { return fs.statSync(path.join(root, n)).isDirectory() } catch { return false }
+  }).sort()
+  let total = 0
+  const sizes: Array<{ name: string; size: number }> = []
+  for (const name of entries) {
+    try {
+      const p = path.join(root, name)
+      let size = 0
+      for (const f of walkFiles(p)) {
+        try { size += fs.statSync(path.join(p, f)).size } catch {}
+      }
+      sizes.push({ name, size })
+      total += size
+    } catch {}
+  }
+  for (const { name, size } of sizes) {
+    if (total <= maxBytes) break
+    try {
+      fs.rmSync(path.join(root, name), { recursive: true, force: true })
+      total -= size
+    } catch {}
+  }
+}
+
+export async function isDuplicateLKG(dshHome: string, lkgRoot: string): Promise<boolean> {
+  // Lightweight dedupe: if latest snapshot is <5 minutes old, skip (prevents 5-min unconditional growth)
+  // Full hash check is too heavy (would read 500MB+ each tick) and caused status timeouts
+  if (!fs.existsSync(lkgRoot)) return false
+  const entries = fs.readdirSync(lkgRoot).filter((n: string) => {
+    try { return fs.statSync(path.join(lkgRoot, n)).isDirectory() } catch { return false }
+  }).sort()
+  if (!entries.length) return false
+  const latestName = entries[entries.length - 1]
+  try {
+    const tsStr = latestName.replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d+)Z$/, '$1-$2-$3T$4:$5:$6.$7Z')
+    const ts = Date.parse(tsStr)
+    if (!isNaN(ts) && Date.now() - ts < 5 * 60 * 1000) {
+      // If latest is recent and DSH home hasn't changed in mtime, consider duplicate
+      // Quick check: compare latest snapshot's mtime vs DSH home's newest file mtime
+      const latestPath = path.join(lkgRoot, latestName)
+      const latestMtime = fs.statSync(latestPath).mtimeMs
+      let newestFileMtime = 0
+      if (fs.existsSync(dshHome)) {
+        for (const entry of fs.readdirSync(dshHome)) {
+          if (entry === '.supervisor') continue
+          try {
+            const s = fs.statSync(path.join(dshHome, entry))
+            if (s.mtimeMs > newestFileMtime) newestFileMtime = s.mtimeMs
+          } catch {}
+        }
+      }
+      if (newestFileMtime > 0 && newestFileMtime < latestMtime) return true
+    }
+  } catch {}
+  return false
 }
 
 export async function verifyLKG(lkgPath: string): Promise<boolean> {
