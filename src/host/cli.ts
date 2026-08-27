@@ -4,6 +4,7 @@ import { writeLKG, verifyLKG } from './snapshot.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import { resolveHarnessRoot, resolveDeepseekHarnessDir } from './paths.js'
 
 export async function runCli(args: string[]): Promise<void> {
   const cmd = args[2] ?? '--help'
@@ -78,7 +79,7 @@ Commands:
         let diff: string = gitDiff ?? ''
         if (!diff) {
           try {
-            const harnessRoot = process.env.MAESTRO_HARNESS_ROOT ?? path.join(os.homedir(), 'Work/htdocs/maestro-harness')
+            const harnessRoot = resolveHarnessRoot()
             diff = await collectGitDiff(harnessRoot).catch(() => '')
             if (!diff) {
               // fallback: try git diff in cwd
@@ -118,7 +119,7 @@ Commands:
         } catch {}
         // Last fallback: detached direct node (portable — sources nvm directly, falls back to system node)
         try {
-          const harnessRoot = process.env.MAESTRO_HARNESS_ROOT ?? path.join(os.homedir(), 'Work/htdocs/maestro-harness/deepseek-harness')
+          const harnessRoot = resolveDeepseekHarnessDir()
           const logPath = path.join(os.homedir(), '.dsh/dsh-web.log')
           execSync(`setsid nohup bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; cd ${JSON.stringify(harnessRoot)} && exec node --import tsx/esm apps/cli/src/bin.ts web --no-open >> ${JSON.stringify(logPath)} 2>&1' &`, { timeout: 5000 })
           console.log('[supervisor] started dsh-web via nohup fallback (direct node, portable)')

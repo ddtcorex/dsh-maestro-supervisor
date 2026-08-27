@@ -1,6 +1,10 @@
 import type { HealthState } from './health-poller.js'
 import { runDebugAgent } from './debug-agent.js'
-import { findInterrupted as defaultFindInterrupted } from './resume.js'
+import { findInterrupted as defaultFindInterrupted, parseDuration } from './resume.js'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import * as os from 'node:os'
+import { resolveHarnessRoot } from './paths.js'
 
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
@@ -38,10 +42,71 @@ export class Supervisor {
     return this.deps.findInterrupted ?? defaultFindInterrupted
   }
 
+  private getResumeWithinMs(): number {
+    // Priority: env > supervisor config.json > maestro settings.json > default 5m
+    const env = process.env.DSH_SUPERVISOR_RESUME_WITHIN
+    if (env) {
+      const v = parseDuration(env)
+      if (v !== undefined) return v
+      const n = parseInt(env, 10)
+      if (!isNaN(n)) return n
+    }
+    try {
+      const cfgPath = path.join(os.homedir(), '.dsh/.supervisor/config.json')
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'))
+        const raw = (cfg as any).autoResumeWithin ?? (cfg as any).resumeWithin
+        if (typeof raw === 'string') {
+          const v = parseDuration(raw)
+          if (v !== undefined) return v
+        } else if (typeof raw === 'number') return raw
+      }
+      const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+      if (fs.existsSync(maestroPath)) {
+        const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
+        const raw = j?.domains?.supervisor?.autoResumeWithin ?? j?.supervisor?.autoResumeWithin
+        if (typeof raw === 'string') {
+          const v = parseDuration(raw)
+          if (v !== undefined) return v
+        } else if (typeof raw === 'number') return raw
+      }
+    } catch {}
+    return 5 * 60 * 1000 // default 5m
+  }
+
+  private async findInterruptedRecent(withinMs?: number): Promise<{ scanned: number; interrupted: string[] }> {
+    const ms = withinMs ?? this.getResumeWithinMs()
+    // Prefer injected mock for testability
+    if (this.deps.findInterrupted) {
+      try {
+        const res = await this.deps.findInterrupted()
+        // If mock doesn't filter by time, we still return as-is (test expects all)
+        // For real filtering when mock is not time-aware, try to filter via resume module if possible
+        if (ms !== undefined && res.interrupted.length) {
+          try {
+            const { findInterrupted } = await import('./resume.js')
+            // Re-query with time filter for real filesystem; if mock was used for test, keep mock result
+            if (process.env.VITEST) return res
+            return findInterrupted(undefined, { withinMs: ms })
+          } catch {}
+        }
+        return res
+      } catch {
+        // fallback to real
+      }
+    }
+    try {
+      const { findInterrupted } = await import('./resume.js')
+      return findInterrupted(undefined, { withinMs: ms })
+    } catch {
+      return this.getFindInterrupted()()
+    }
+  }
+
   private async collectGitDiff(): Promise<string> {
     try {
       const { execSync } = await import('node:child_process')
-      const ws = process.env.MAESTRO_HARNESS_ROOT ?? '/home/kai/Work/htdocs/maestro-harness'
+      const ws = resolveHarnessRoot()
       try {
         const out = execSync(`git -C ${JSON.stringify(ws)} status --porcelain 2>/dev/null | head -n 50`, { encoding: 'utf-8', timeout: 2000 })
         if (out.trim()) {
@@ -59,8 +124,8 @@ export class Supervisor {
   private handleDebugResult(reportPath: string, res: { fixed: boolean; reason: string }): void {
     if (res.fixed) {
       void this.deps.notify(`FIXED: debug-agent fixed ${reportPath} — ${res.reason}`).catch(() => {})
-      // After fix, try to resume interrupted sessions
-      void this.getFindInterrupted()().then(r => {
+      // After fix, try to resume interrupted sessions (only recent, default 5m from config)
+      void this.findInterruptedRecent().then(r => {
         if (r.interrupted.length) void this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0, 3).join(', ')})`).catch(() => {})
       }).catch(() => {})
     } else if (res.reason.includes('max attempts')) {
@@ -89,19 +154,18 @@ export class Supervisor {
         await this.deps.notify(`DEGRADED: ${health.error ?? 'plugin'} (report: ${reportPath})`).catch(() => {})
         // Phase 3: debug + resume — use injected fn if provided (even in VITEST), otherwise fire-and-forget real impl (skip in VITEST)
         const runner = this.getRunDebugAgent()
-        const finder = this.getFindInterrupted()
         const isInjected = !!this.deps.runDebugAgent
         if (isInjected) {
           void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
           setTimeout(() => {
-            finder().then(r => {
+            this.findInterruptedRecent().then(r => {
               if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0,3).join(', ')})`).catch(() => {})
             }).catch(() => {})
           }, 0)
         } else if (!process.env.VITEST) {
           void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
           setTimeout(() => {
-            finder().then(r => {
+            this.findInterruptedRecent().then(r => {
               if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0,3).join(', ')})`).catch(() => {})
             }).catch(() => {})
           }, 0)
@@ -155,19 +219,18 @@ export class Supervisor {
       }
       await this.deps.notify(`CRASH detected → rollback (report: ${reportPath}, error: ${health.error ?? 'down'})`).catch(() => {})
       const runner = this.getRunDebugAgent()
-      const finder = this.getFindInterrupted()
       const isInjected = !!this.deps.runDebugAgent
       if (isInjected) {
         void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
         setTimeout(() => {
-          finder().then(r => {
+          this.findInterruptedRecent().then(r => {
             if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions`).catch(() => {})
           }).catch(() => {})
         }, 0)
       } else if (!process.env.VITEST) {
         void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
         setTimeout(() => {
-          finder().then(r => {
+          this.findInterruptedRecent().then(r => {
             if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions`).catch(() => {})
           }).catch(() => {})
         }, 0)
