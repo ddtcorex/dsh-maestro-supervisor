@@ -3,12 +3,19 @@
   "version": "0.5.4",
   "description": "Supervisor daemon for DSH Web resilience \u2014 auto-detect crashes, rollback to LKG, report",
   "type": "module",
+  "main": "./lib/index.js",
   "bin": {
-    "dsh-web-supervisor": "./lib/index.js"
+    "dsh-web-supervisor": "./lib/bin.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
   "files": [
     "lib",
-    "README.md"
+    "README.md",
+    "cordis.patch.yml"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

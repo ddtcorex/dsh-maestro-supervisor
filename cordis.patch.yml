@@ -1,0 +1,11 @@
+# dsh-maestro-supervisor host plugin — auto-resume for interrupted sessions after DSH web restart.
+# The standalone daemon (systemd) handles crash detection and web restart;
+# this plugin runs inside DSH web and auto-resumes sessions within the
+# configured window (default 5 minutes, enabled by default).
+# Install with `dsh plugin --profile web add @ddtcorex/dsh-maestro-supervisor`
+- insert:
+    - id: maestro-supervisor
+      name: '@ddtcorex/dsh-maestro-supervisor'
+      config:
+        autoResumeWithin: 5
+        autoResumeEnabled: true

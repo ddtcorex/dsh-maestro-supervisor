@@ -1,0 +1,22 @@
+[Unit]
+Description=DSH Web — main harness web UI + webhook (:3080/:3000)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%MAESTRO_ROOT%/deepseek-harness
+# Portable: sources nvm directly (bash -lc alone fails — ~/.bashrc exits early for
+# non-interactive shells via `case $- in *i*) ;; *) return;; esac`, so nvm never loads).
+# Falls back to system node for machines without nvm — no hardcoded /v24.19.0 version.
+ExecStart=/bin/bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; exec node --import tsx/esm apps/cli/src/bin.ts web --no-open'
+Restart=always
+RestartSec=3
+Environment=DSH_HOME=%h/.dsh
+Environment=NODE_ENV=production
+# Log to file for supervisor health tail (append keeps history across restarts)
+StandardOutput=append:%h/.dsh/dsh-web.log
+StandardError=append:%h/.dsh/dsh-web.log
+
+[Install]
+WantedBy=default.target

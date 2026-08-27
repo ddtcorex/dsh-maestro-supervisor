@@ -7,11 +7,19 @@ export interface ResumeResult {
   interrupted: string[]
 }
 
-export async function findInterrupted(dshHome?: string): Promise<ResumeResult> {
+export interface FindInterruptedOpts {
+  withinMs?: number // only sessions interrupted within this window from now
+  sinceMs?: number // or since this absolute epoch ms
+}
+
+export async function findInterrupted(dshHome?: string, opts?: FindInterruptedOpts): Promise<ResumeResult> {
   const home = dshHome ?? path.join(os.homedir(), '.dsh')
   const sessionsRoot = path.join(home, 'sessions')
   let scanned = 0
   const interrupted: string[] = []
+  const now = Date.now()
+  const withinMs = opts?.withinMs
+  const sinceMs = opts?.sinceMs ?? (withinMs !== undefined ? now - withinMs : undefined)
   try {
     const groups = fs.readdirSync(sessionsRoot, { withFileTypes: true })
     for (const g of groups) {
@@ -24,19 +32,62 @@ export async function findInterrupted(dshHome?: string): Promise<ResumeResult> {
         const zstdPath = path.join(groupPath, s.name, 'session.jsonl.zstd')
         const jsonlPath = path.join(groupPath, s.name, 'session.jsonl')
         try {
-          let content = ''
+          // Cheap pre-filter before any (potentially expensive) decompression: a
+          // session log's mtime only advances when something is appended to it,
+          // so a file older than the requested cutoff cannot contain a turn/end
+          // event within the window. Only applies when a window was requested —
+          // an unfiltered scan (sinceMs === undefined) must still see everything.
+          if (sinceMs !== undefined) {
+            try {
+              const statPath = fs.existsSync(zstdPath) ? zstdPath : (fs.existsSync(jsonlPath) ? jsonlPath : undefined)
+              if (statPath) {
+                const mtimeMs = fs.statSync(statPath).mtimeMs
+                if (mtimeMs < sinceMs) continue
+              }
+            } catch {}
+          }
+          let lines: string[] = []
           if (fs.existsSync(zstdPath)) {
             const { execSync } = await import('node:child_process')
-            content = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | tail -5`, { encoding: 'utf-8' })
+            const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | tail -20`, { encoding: 'utf-8' })
+            lines = out.split('\n').filter(Boolean)
           } else if (fs.existsSync(jsonlPath)) {
-            content = fs.readFileSync(jsonlPath, 'utf-8').slice(-5000)
+            const content = fs.readFileSync(jsonlPath, 'utf-8')
+            lines = content.trim().split('\n').slice(-20)
           }
-          if (content.toLowerCase().includes('interrupted')) {
-            interrupted.push(`${g.name}/${s.name}`)
+          let found = false
+          let foundTime: number | undefined
+          for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i]
+            try {
+              const obj = JSON.parse(line)
+              foundTime = typeof obj.time === 'number' ? obj.time : undefined
+              if (obj.type === 'turn/end' && obj.data?.reason?.kind === 'interrupted') { found = true; break }
+            } catch {}
           }
+          if (!found) continue
+          if (sinceMs !== undefined && foundTime !== undefined) {
+            if (foundTime < sinceMs) continue // too old
+          } else if (sinceMs !== undefined && foundTime === undefined) {
+            // no timestamp, skip when filtering by time
+            continue
+          }
+          interrupted.push(`${g.name}/${s.name}`)
         } catch {}
       }
     }
   } catch {}
   return { scanned, interrupted }
+}
+
+export function parseDuration(s: string): number | undefined {
+  if (!s) return undefined
+  const m = s.trim().match(/^(\d+)(s|m|h)?$/)
+  if (!m) return undefined
+  const n = parseInt(m[1], 10)
+  const unit = m[2] ?? 's'
+  if (unit === 's') return n * 1000
+  if (unit === 'm') return n * 60 * 1000
+  if (unit === 'h') return n * 60 * 60 * 1000
+  return undefined
 }

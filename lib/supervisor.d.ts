@@ -17,6 +17,7 @@ export interface SupervisorDeps {
         gitDiff?: string;
     }) => Promise<string>;
     rollback: (ts?: string) => Promise<void>;
+    restartWeb?: () => Promise<void>;
     notify: (msg: string) => Promise<void>;
     intervalMs?: number;
     debounceMs?: number;
@@ -43,7 +44,11 @@ export declare class Supervisor {
     constructor(deps: SupervisorDeps);
     private getRunDebugAgent;
     private getFindInterrupted;
+    private getAutoResumeEnabled;
+    private getResumeWithinMs;
+    private findInterruptedRecent;
     private collectGitDiff;
+    private attemptAutoResume;
     private handleDebugResult;
     tick(): Promise<void>;
     start(): void;

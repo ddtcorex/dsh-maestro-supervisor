@@ -1,0 +1,198 @@
+import { describe, it, expect, vi } from 'vitest'
+import { resumeInterrupted, runAutoResume, apply } from '../src/host/plugin.js'
+
+function makeCtx(overrides: Record<string, any> = {}) {
+  const logs: string[] = []
+  return {
+    logger: {
+      info: (msg: string) => logs.push(`info:${msg}`),
+      warn: (msg: string) => logs.push(`warn:${msg}`),
+    },
+    sessions: { get: () => undefined },
+    get: (key: string) => (overrides[key] !== undefined ? overrides[key] : undefined),
+    _logs: logs,
+    ...overrides,
+  }
+}
+
+describe('resumeInterrupted', () => {
+  it('skips a session that is already live', async () => {
+    const ctx = makeCtx({ sessions: { get: () => ({ status: 'active' }) } })
+    await resumeInterrupted(ctx, ['proj/abc-123'])
+    expect(ctx._logs.some((l: string) => l.includes('already live'))).toBe(true)
+  })
+
+  it('does nothing for a session with no sessionPersistence available', async () => {
+    const ctx = makeCtx()
+    await expect(resumeInterrupted(ctx, ['proj/abc-123'])).resolves.toBeUndefined()
+  })
+
+  it('continues to the next id when one session throws', async () => {
+    const throwingPersistence = { load: async () => { throw new Error('disk error') } }
+    const ctx = makeCtx({ sessionPersistence: throwingPersistence })
+    await expect(resumeInterrupted(ctx, ['proj/bad-1', 'proj/bad-2'])).resolves.toBeUndefined()
+    expect(ctx._logs.filter((l: string) => l.includes('warn:')).length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('runAutoResume', () => {
+  // All tests below pass config.autoResumeEnabled explicitly rather than
+  // relying on ambient process.env.DSH_SUPERVISOR_AUTO_RESUME or files under
+  // ~/.dsh — the Finding 3 config seam lets tests be deterministic regardless
+  // of the machine they run on (see also the DSH_SUPERVISOR_AUTO_RESUME=0
+  // ambient-decoupling tests further down).
+  const enabledConfig = { autoResumeEnabled: true } as const
+
+  it('does not throw when findInterrupted throws', async () => {
+    const ctx = makeCtx()
+    const boom = async () => { throw new Error('scan failed') }
+    await expect(
+      runAutoResume(ctx, { findInterrupted: boom as any, config: enabledConfig })
+    ).resolves.toBeUndefined()
+    expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
+
+  it('does not throw when resumeInterrupted throws', async () => {
+    const ctx = makeCtx()
+    const scan = async () => ({ scanned: 1, interrupted: ['proj/a-1'] })
+    const boomResume = async () => { throw new Error('resume failed') }
+    await expect(
+      runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: boomResume as any, config: enabledConfig })
+    ).resolves.toBeUndefined()
+    expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
+
+  it('calls resumeInterrupted with the scanned ids when interrupted sessions exist', async () => {
+    const ctx = makeCtx()
+    const scan = async () => ({ scanned: 2, interrupted: ['proj/a-1', 'proj/b-2'] })
+    const resumeSpy = vi.fn(async () => {})
+    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy, config: enabledConfig })
+    expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1', 'proj/b-2'])
+  })
+
+  it('skips resumeInterrupted entirely when nothing is interrupted', async () => {
+    const ctx = makeCtx()
+    const scan = async () => ({ scanned: 5, interrupted: [] })
+    const resumeSpy = vi.fn(async () => {})
+    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy, config: enabledConfig })
+    expect(resumeSpy).not.toHaveBeenCalled()
+  })
+
+  it('does not throw when opts is null (explicitly passed, not undefined)', async () => {
+    const ctx = makeCtx()
+    // Passing null instead of undefined to test that property access doesn't escape the try block
+    await expect(
+      runAutoResume(ctx, null as any)
+    ).resolves.toBeUndefined()
+    expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
+
+  it('skips scanning entirely (does not call findInterrupted) when config.autoResumeEnabled is false, even if env would otherwise enable it', async () => {
+    const prevEnv = process.env.DSH_SUPERVISOR_AUTO_RESUME
+    process.env.DSH_SUPERVISOR_AUTO_RESUME = '1' // ambient env says "enabled"
+    try {
+      const ctx = makeCtx()
+      const findSpy = vi.fn(async () => ({ scanned: 3, interrupted: ['proj/a-1'] }))
+      await runAutoResume(ctx, { findInterrupted: findSpy, config: { autoResumeEnabled: false } })
+      expect(findSpy).not.toHaveBeenCalled()
+      expect(ctx._logs.some((l: string) => l.includes('auto-resume disabled'))).toBe(true)
+    } finally {
+      if (prevEnv === undefined) delete process.env.DSH_SUPERVISOR_AUTO_RESUME
+      else process.env.DSH_SUPERVISOR_AUTO_RESUME = prevEnv
+    }
+  })
+
+  it('prefers config.autoResumeWithin over env DSH_SUPERVISOR_RESUME_WITHIN when both are set', async () => {
+    const prevEnv = process.env.DSH_SUPERVISOR_RESUME_WITHIN
+    process.env.DSH_SUPERVISOR_RESUME_WITHIN = '99'
+    try {
+      const ctx = makeCtx()
+      let capturedWithinMs: number | undefined
+      const findSpy = vi.fn(async (_home: any, opts: any) => {
+        capturedWithinMs = opts?.withinMs
+        return { scanned: 0, interrupted: [] }
+      })
+      await runAutoResume(ctx, { findInterrupted: findSpy, config: { autoResumeEnabled: true, autoResumeWithin: 7 } })
+      expect(capturedWithinMs).toBe(7 * 60 * 1000)
+    } finally {
+      if (prevEnv === undefined) delete process.env.DSH_SUPERVISOR_RESUME_WITHIN
+      else process.env.DSH_SUPERVISOR_RESUME_WITHIN = prevEnv
+    }
+  })
+})
+
+function makeCtxWithEffect(overrides: Record<string, any> = {}) {
+  const logs: string[] = []
+  const rpcHandlers: { channel: string; opts: any }[] = []
+  return {
+    logger: { info: (m: string) => logs.push(`info:${m}`), warn: (m: string) => logs.push(`warn:${m}`) },
+    effect: (fn: any) => fn(),
+    connection: {
+      rpc: {
+        handle: (channel: string, _handler: any, opts?: any) => {
+          rpcHandlers.push({ channel, opts })
+          return () => {}
+        },
+      },
+    },
+    sessions: { get: () => undefined },
+    get: () => undefined,
+    _logs: logs,
+    _rpcHandlers: rpcHandlers,
+    ...overrides,
+  }
+}
+
+describe('apply', () => {
+  it('registers the RPC handler exactly once on the corrected channel name', () => {
+    const ctx = makeCtxWithEffect()
+    apply(ctx)
+    expect(ctx._rpcHandlers).toHaveLength(1)
+    expect(ctx._rpcHandlers[0].channel).toBe('/dsh-maestro-supervisor-resume')
+    expect(ctx._rpcHandlers[0].channel).toMatch(/^\/[A-Za-z0-9._~-]+$/)
+  })
+
+  it('does not throw when ctx.connection.rpc.handle itself throws', () => {
+    const ctx = makeCtxWithEffect({
+      connection: { rpc: { handle: () => { throw new Error('bad channel') } } },
+    })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('does not throw when ctx.connection is missing entirely', () => {
+    const ctx = makeCtxWithEffect({ connection: undefined })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('returns a disposer from the effect that clears the timer and unregisters RPC without throwing', () => {
+    const ctx = makeCtxWithEffect()
+    let disposer: any
+    ctx.effect = (fn: any) => { disposer = fn(); return disposer }
+    apply(ctx)
+    expect(typeof disposer).toBe('function')
+    expect(() => disposer()).not.toThrow()
+  })
+
+  it('does not throw when ctx.effect itself throws', () => {
+    const ctx = makeCtxWithEffect({
+      effect: () => { throw new Error('effect boom') },
+    })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('does not throw when ctx.effect is missing entirely', () => {
+    const ctx = makeCtxWithEffect({ effect: undefined })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('does not throw when ctx.connection.rpc.handle throws AND the logger.warn used to report it also throws', () => {
+    const ctx = makeCtxWithEffect({
+      connection: { rpc: { handle: () => { throw new Error('bad channel') } } },
+      logger: {
+        info: () => {},
+        warn: () => { throw new Error('logger boom') },
+      },
+    })
+    expect(() => apply(ctx)).not.toThrow()
+  })
+})

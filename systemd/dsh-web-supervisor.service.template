@@ -1,10 +1,13 @@
 [Unit]
 Description=DSH Web Supervisor — auto-rollback for dsh web crashes
-After=network.target
+After=network.target dsh-web.service
+Wants=dsh-web.service
 
 [Service]
 Type=simple
-ExecStart=%h/.nvm/versions/node/v24.19.0/bin/node %h/Work/htdocs/maestro-harness/packages/dsh-maestro-supervisor/lib/index.js daemon
+# Portable: sources nvm directly (bash -lc alone fails — ~/.bashrc guard),
+# then execs node (works for nvm, fnm, volta, system via PATH fallback)
+ExecStart=/bin/bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; exec node %MAESTRO_ROOT%/packages/dsh-maestro-supervisor/lib/bin.js daemon'
 Restart=always
 RestartSec=2
 Environment=DSH_HOME=%h/.dsh
