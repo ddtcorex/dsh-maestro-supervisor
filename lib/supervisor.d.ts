@@ -44,9 +44,11 @@ export declare class Supervisor {
     constructor(deps: SupervisorDeps);
     private getRunDebugAgent;
     private getFindInterrupted;
+    private getAutoResumeEnabled;
     private getResumeWithinMs;
     private findInterruptedRecent;
     private collectGitDiff;
+    private attemptAutoResume;
     private handleDebugResult;
     tick(): Promise<void>;
     start(): void;

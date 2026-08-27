@@ -42,6 +42,43 @@ export class Supervisor {
     return this.deps.findInterrupted ?? defaultFindInterrupted
   }
 
+  private getAutoResumeEnabled(): boolean {
+    // Priority: env > supervisor config.json > maestro settings.json > default true (enabled)
+    // Configures whether interrupted sessions are auto-resumed after restart (vs only notify).
+    // For Settings UI: boolean toggle — true = auto-resume within window, false = notify only.
+    const env = process.env.DSH_SUPERVISOR_AUTO_RESUME
+    if (env !== undefined) {
+      const v = env.trim().toLowerCase()
+      if (['1','true','yes','on','enabled'].includes(v)) return true
+      if (['0','false','no','off','disabled'].includes(v)) return false
+    }
+    try {
+      const cfgPath = path.join(os.homedir(), '.dsh/.supervisor/config.json')
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'))
+        const raw = (cfg as any).autoResumeEnabled ?? (cfg as any).autoResume
+        if (typeof raw === 'boolean') return raw
+        if (typeof raw === 'string') {
+          const v = raw.trim().toLowerCase()
+          if (['1','true','yes','on'].includes(v)) return true
+          if (['0','false','no','off'].includes(v)) return false
+        }
+      }
+      const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+      if (fs.existsSync(maestroPath)) {
+        const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
+        const raw = j?.domains?.supervisor?.autoResumeEnabled ?? j?.supervisor?.autoResumeEnabled ?? j?.domains?.supervisor?.autoResume ?? j?.supervisor?.autoResume
+        if (typeof raw === 'boolean') return raw
+        if (typeof raw === 'string') {
+          const v = raw.trim().toLowerCase()
+          if (['1','true','yes','on'].includes(v)) return true
+          if (['0','false','no','off'].includes(v)) return false
+        }
+      }
+    } catch {}
+    return true // default enabled
+  }
+
   private getResumeWithinMs(): number {
     // Priority: env > supervisor config.json > maestro settings.json > default 5 (minutes)
     // Note: config value is in MINUTES (number 5 = 5 minutes). String "5m"/"30s"/"1h" also supported via parseDuration.
@@ -129,12 +166,31 @@ export class Supervisor {
     }
   }
 
+  private async attemptAutoResume(ids: string[]): Promise<void> {
+    if (!ids.length) return
+    if (!this.getAutoResumeEnabled()) {
+      await this.deps.notify(`RESUME: ${ids.length} interrupted sessions (${ids.slice(0, 3).join(', ')}) — auto-resume disabled`).catch(() => {})
+      return
+    }
+    // Auto-resume enabled: notify and best-effort trigger via DSH web (if endpoint exists)
+    await this.deps.notify(`RESUME: ${ids.length} interrupted sessions (${ids.slice(0, 3).join(', ')}) — auto-resuming`).catch(() => {})
+    for (const id of ids) {
+      try {
+        // Try DSH web resume endpoint (best-effort, ignore failures — session remains resumable via UI)
+        const { execSync } = await import('node:child_process')
+        // Session id format is "<group>/<sessionId>" — encode for URL
+        const enc = encodeURIComponent(id)
+        execSync(`curl -s -X POST http://127.0.0.1:3080/api/sessions/${enc}/resume --max-time 2 2>/dev/null || true`, { timeout: 3000, stdio: 'pipe' })
+      } catch {}
+    }
+  }
+
   private handleDebugResult(reportPath: string, res: { fixed: boolean; reason: string }): void {
     if (res.fixed) {
       void this.deps.notify(`FIXED: debug-agent fixed ${reportPath} — ${res.reason}`).catch(() => {})
-      // After fix, try to resume interrupted sessions (only recent, default 5m from config)
+      // After fix, try to resume interrupted sessions (only recent, default 5 from config, in minutes)
       void this.findInterruptedRecent().then(r => {
-        if (r.interrupted.length) void this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0, 3).join(', ')})`).catch(() => {})
+        if (r.interrupted.length) void this.attemptAutoResume(r.interrupted).catch(() => {})
       }).catch(() => {})
     } else if (res.reason.includes('max attempts')) {
       void this.deps.notify(`FIX FAILED after 3 attempts — needs human (report: ${reportPath}, reason: ${res.reason})`).catch(() => {})
@@ -167,14 +223,14 @@ export class Supervisor {
           void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
           setTimeout(() => {
             this.findInterruptedRecent().then(r => {
-              if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0,3).join(', ')})`).catch(() => {})
+              if (r.interrupted.length) void this.attemptAutoResume(r.interrupted).catch(() => {})
             }).catch(() => {})
           }, 0)
         } else if (!process.env.VITEST) {
           void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
           setTimeout(() => {
             this.findInterruptedRecent().then(r => {
-              if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions (${r.interrupted.slice(0,3).join(', ')})`).catch(() => {})
+              if (r.interrupted.length) void this.attemptAutoResume(r.interrupted).catch(() => {})
             }).catch(() => {})
           }, 0)
         }
@@ -232,14 +288,14 @@ export class Supervisor {
         void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
         setTimeout(() => {
           this.findInterruptedRecent().then(r => {
-            if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions`).catch(() => {})
+            if (r.interrupted.length) void this.attemptAutoResume(r.interrupted).catch(() => {})
           }).catch(() => {})
         }, 0)
       } else if (!process.env.VITEST) {
         void runner({ reportPath, health }).then(res => this.handleDebugResult(reportPath, res)).catch(() => {})
         setTimeout(() => {
           this.findInterruptedRecent().then(r => {
-            if (r.interrupted.length) this.deps.notify(`RESUME: ${r.interrupted.length} interrupted sessions`).catch(() => {})
+            if (r.interrupted.length) void this.attemptAutoResume(r.interrupted).catch(() => {})
           }).catch(() => {})
         }, 0)
       }
