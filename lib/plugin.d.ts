@@ -14,6 +14,7 @@ export interface SupervisorPluginConfig {
 export declare function runAutoResume(ctx: any, opts?: {
     findInterrupted?: typeof defaultFindInterrupted;
     resumeInterrupted?: typeof resumeInterrupted;
+    config?: SupervisorPluginConfig;
 }): Promise<void>;
 export declare function resumeInterrupted(ctx: any, ids: string[]): Promise<void>;
 export declare function apply(ctx: any, config?: SupervisorPluginConfig): void;

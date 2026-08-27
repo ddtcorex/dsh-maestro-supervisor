@@ -30,7 +30,11 @@ function parseDuration(s: string): number | undefined {
   return undefined
 }
 
-function getAutoResumeEnabled(): boolean {
+function getAutoResumeEnabled(config?: SupervisorPluginConfig): boolean {
+  // The Cordis-supplied config (cordis.patch.yml's `config:` block, or whatever
+  // the caller passes to apply()) is the highest-precedence source — it is an
+  // explicit, per-install decision and must win over ambient env/files.
+  if (typeof config?.autoResumeEnabled === 'boolean') return config.autoResumeEnabled
   const env = process.env.DSH_SUPERVISOR_AUTO_RESUME
   if (env !== undefined) {
     const v = env.trim().toLowerCase()
@@ -64,7 +68,17 @@ function getAutoResumeEnabled(): boolean {
   return true
 }
 
-function getResumeWithinMs(): number {
+function getResumeWithinMs(config?: SupervisorPluginConfig): number {
+  // Same precedence rule as getAutoResumeEnabled: explicit config wins first.
+  if (config?.autoResumeWithin !== undefined) {
+    const raw = config.autoResumeWithin
+    if (typeof raw === 'number') return raw * 60 * 1000
+    if (typeof raw === 'string') {
+      if (/^\d+$/.test(raw.trim())) return parseInt(raw.trim(), 10) * 60 * 1000
+      const v = parseDuration(raw)
+      if (v !== undefined) return v
+    }
+  }
   const env = process.env.DSH_SUPERVISOR_RESUME_WITHIN
   if (env) {
     if (/^\d+$/.test(env.trim())) return parseInt(env.trim(), 10) * 60 * 1000
@@ -101,16 +115,17 @@ export async function runAutoResume(
   opts: {
     findInterrupted?: typeof defaultFindInterrupted
     resumeInterrupted?: typeof resumeInterrupted
+    config?: SupervisorPluginConfig
   } = {}
 ): Promise<void> {
   try {
     const doFind = opts.findInterrupted ?? defaultFindInterrupted
     const doResume = opts.resumeInterrupted ?? resumeInterrupted
-    if (!getAutoResumeEnabled()) {
+    if (!getAutoResumeEnabled(opts?.config)) {
       ctx.logger?.info?.('[supervisor] auto-resume disabled — skip')
       return
     }
-    const withinMs = getResumeWithinMs()
+    const withinMs = getResumeWithinMs(opts?.config)
     const { scanned, interrupted } = await doFind(undefined, { withinMs })
     if (!interrupted.length) {
       ctx.logger?.info?.(`[supervisor] auto-resume: 0/${scanned} interrupted within ${withinMs}ms — nothing to do`)
@@ -179,7 +194,7 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
 
       timer = setTimeout(() => {
         if (disposed) return
-        runAutoResume(ctx).catch(() => {
+        runAutoResume(ctx, { config }).catch(() => {
           // runAutoResume already never rejects, but guard the .catch itself is a no-op safety net
         })
       }, 8000)
@@ -191,7 +206,7 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
           disposeRpc = conn.rpc.handle(
             '/dsh-maestro-supervisor-resume',
             async (_endpoint: string, payload: any) => {
-              const within = payload?.withinMs ?? getResumeWithinMs()
+              const within = payload?.withinMs ?? getResumeWithinMs(config)
               return await defaultFindInterrupted(undefined, { withinMs: within })
             },
             { authority: 'loopback' }

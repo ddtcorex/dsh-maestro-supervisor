@@ -36,11 +36,18 @@ describe('resumeInterrupted', () => {
 })
 
 describe('runAutoResume', () => {
+  // All tests below pass config.autoResumeEnabled explicitly rather than
+  // relying on ambient process.env.DSH_SUPERVISOR_AUTO_RESUME or files under
+  // ~/.dsh — the Finding 3 config seam lets tests be deterministic regardless
+  // of the machine they run on (see also the DSH_SUPERVISOR_AUTO_RESUME=0
+  // ambient-decoupling tests further down).
+  const enabledConfig = { autoResumeEnabled: true } as const
+
   it('does not throw when findInterrupted throws', async () => {
     const ctx = makeCtx()
     const boom = async () => { throw new Error('scan failed') }
     await expect(
-      runAutoResume(ctx, { findInterrupted: boom as any })
+      runAutoResume(ctx, { findInterrupted: boom as any, config: enabledConfig })
     ).resolves.toBeUndefined()
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
   })
@@ -50,7 +57,7 @@ describe('runAutoResume', () => {
     const scan = async () => ({ scanned: 1, interrupted: ['proj/a-1'] })
     const boomResume = async () => { throw new Error('resume failed') }
     await expect(
-      runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: boomResume as any })
+      runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: boomResume as any, config: enabledConfig })
     ).resolves.toBeUndefined()
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
   })
@@ -59,7 +66,7 @@ describe('runAutoResume', () => {
     const ctx = makeCtx()
     const scan = async () => ({ scanned: 2, interrupted: ['proj/a-1', 'proj/b-2'] })
     const resumeSpy = vi.fn(async () => {})
-    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy })
+    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy, config: enabledConfig })
     expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1', 'proj/b-2'])
   })
 
@@ -67,7 +74,7 @@ describe('runAutoResume', () => {
     const ctx = makeCtx()
     const scan = async () => ({ scanned: 5, interrupted: [] })
     const resumeSpy = vi.fn(async () => {})
-    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy })
+    await runAutoResume(ctx, { findInterrupted: scan as any, resumeInterrupted: resumeSpy, config: enabledConfig })
     expect(resumeSpy).not.toHaveBeenCalled()
   })
 
@@ -78,6 +85,39 @@ describe('runAutoResume', () => {
       runAutoResume(ctx, null as any)
     ).resolves.toBeUndefined()
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
+
+  it('skips scanning entirely (does not call findInterrupted) when config.autoResumeEnabled is false, even if env would otherwise enable it', async () => {
+    const prevEnv = process.env.DSH_SUPERVISOR_AUTO_RESUME
+    process.env.DSH_SUPERVISOR_AUTO_RESUME = '1' // ambient env says "enabled"
+    try {
+      const ctx = makeCtx()
+      const findSpy = vi.fn(async () => ({ scanned: 3, interrupted: ['proj/a-1'] }))
+      await runAutoResume(ctx, { findInterrupted: findSpy, config: { autoResumeEnabled: false } })
+      expect(findSpy).not.toHaveBeenCalled()
+      expect(ctx._logs.some((l: string) => l.includes('auto-resume disabled'))).toBe(true)
+    } finally {
+      if (prevEnv === undefined) delete process.env.DSH_SUPERVISOR_AUTO_RESUME
+      else process.env.DSH_SUPERVISOR_AUTO_RESUME = prevEnv
+    }
+  })
+
+  it('prefers config.autoResumeWithin over env DSH_SUPERVISOR_RESUME_WITHIN when both are set', async () => {
+    const prevEnv = process.env.DSH_SUPERVISOR_RESUME_WITHIN
+    process.env.DSH_SUPERVISOR_RESUME_WITHIN = '99'
+    try {
+      const ctx = makeCtx()
+      let capturedWithinMs: number | undefined
+      const findSpy = vi.fn(async (_home: any, opts: any) => {
+        capturedWithinMs = opts?.withinMs
+        return { scanned: 0, interrupted: [] }
+      })
+      await runAutoResume(ctx, { findInterrupted: findSpy, config: { autoResumeEnabled: true, autoResumeWithin: 7 } })
+      expect(capturedWithinMs).toBe(7 * 60 * 1000)
+    } finally {
+      if (prevEnv === undefined) delete process.env.DSH_SUPERVISOR_RESUME_WITHIN
+      else process.env.DSH_SUPERVISOR_RESUME_WITHIN = prevEnv
+    }
   })
 })
 
