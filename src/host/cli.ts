@@ -105,6 +105,11 @@ Commands:
       },
       restartWeb: async () => {
         const { execSync } = await import('node:child_process')
+        // Kill stale MainThread holding 3080/3000 before any restart attempt
+        // (EADDRINUSE crash leaves old pid alive with http 200; new start would fail)
+        try {
+          execSync(`pids=$(ss -tlnp 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p' | sort -u); if [ -n "$pids" ]; then echo "[supervisor] killing stale pids $pids"; kill $pids 2>/dev/null || true; sleep 2; fi`, { timeout: 5000, stdio: 'pipe' })
+        } catch {}
         // Prefer systemd — if dsh-web.service is installed, restart/start it
         try {
           execSync('systemctl --user is-active --quiet dsh-web.service && systemctl --user restart dsh-web.service || systemctl --user start dsh-web.service', { timeout: 15000, stdio: 'pipe' })

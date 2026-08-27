@@ -9,7 +9,7 @@ export interface FindInterruptedOpts {
 export declare function findInterrupted(dshHome?: string, opts?: FindInterruptedOpts): Promise<ResumeResult>;
 /**
  * Detect sessions whose raw log ends with a `turn/start` that has no
- * matching `turn/end` anywhere later in the scanned tail — a dangling open
+ * matching `turn/end` anywhere later in the scanned log — a dangling open
  * turn. Unlike {@link findInterrupted}, this needs no prior `persistence.load()`
  * call to have already synthesized a `turn/end interrupted` closer (DSH core
  * only writes that closer when something loads/prepares the specific
