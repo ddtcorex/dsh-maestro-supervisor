@@ -307,9 +307,9 @@ async function resolveLLMConfig(): Promise<LLMConfig> {
     process.env.OPENCODE_API_URL ??
     null
 
-  // Model: AI_MODEL / DEEPSEEK_MODEL / settings.json domains.review.model / default
+  // Model: AI_MODEL / DEEPSEEK_MODEL / settings.json domains.supervisor.model -> domains.review.model / default
+  // Supervisor has its own picker; falls back to review model for backward compat, then DSH default.
   let model = process.env.AI_MODEL ?? process.env.DEEPSEEK_MODEL ?? process.env.OPENAI_MODEL ?? null
-  // Try settings.json first (review model is the user's current default model)
   if (!model) {
     try {
       const { readFileSync } = await import('node:fs')
@@ -317,9 +317,15 @@ async function resolveLLMConfig(): Promise<LLMConfig> {
       const settingsPath = `${homedir()}/.dsh/maestro/settings.json`
       const raw = readFileSync(settingsPath, 'utf-8')
       const j = JSON.parse(raw)
-      const m = j?.domains?.review?.model?.model ?? j?.domains?.review?.model
-      if (typeof m === 'string') model = m
-      else if (m?.model && typeof m.model === 'string') model = m.model
+      // Prefer supervisor model, fall back to review model (so old installs keep working)
+      const sup = j?.domains?.supervisor?.model?.model ?? j?.domains?.supervisor?.model
+      const rev = j?.domains?.review?.model?.model ?? j?.domains?.review?.model
+      let m: unknown = null
+      if (typeof sup === 'string') m = sup
+      else if (sup?.model && typeof sup.model === 'string') m = sup.model
+      else if (typeof rev === 'string') m = rev
+      else if (rev?.model && typeof rev.model === 'string') m = rev.model
+      if (typeof m === 'string' && m.trim() !== '') model = m as string
     } catch {}
   }
   if (!model) model = 'deepseek-chat'
