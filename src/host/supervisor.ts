@@ -17,6 +17,7 @@ export class Supervisor {
   private lastRollback = 0
   private rollingBack = false
   private lastLKGWrite = 0
+  private lastDegradedNotify = 0
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(deps: SupervisorDeps) {
@@ -25,6 +26,19 @@ export class Supervisor {
 
   async tick(): Promise<void> {
     const health = await this.deps.pollHealth()
+
+    // DEGRADED: http 200 but log has plugin error → report, notify, no rollback
+    if (health.degraded) {
+      const now = this.deps.getTime ? this.deps.getTime() : Date.now()
+      if (now - this.lastDegradedNotify < 60000) return
+      this.lastDegradedNotify = now
+      try {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-')
+        const reportPath = await this.deps.writeReport({ ts, health, action: `degraded — ${health.error ?? 'plugin'}` }).catch(() => '')
+        await this.deps.notify(`DEGRADED: ${health.error ?? 'plugin'} (report: ${reportPath})`).catch(() => {})
+      } catch {}
+      return
+    }
 
     if (health.up) {
       // Throttle LKG writes to at most once per 5 minutes
