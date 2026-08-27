@@ -6,7 +6,7 @@
  * and web restart; this plugin handles the in-process resume.
  */
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js';
-export declare const inject: readonly ["sessions", "connection"];
+export declare const inject: readonly ["sessions", "agents", "connection"];
 export interface SupervisorPluginConfig {
     autoResumeWithin?: number | string;
     autoResumeEnabled?: boolean;
@@ -17,5 +17,26 @@ export declare function runAutoResume(ctx: any, opts?: {
     resumeInterrupted?: typeof resumeInterrupted;
     config?: SupervisorPluginConfig;
 }): Promise<void>;
-export declare function resumeInterrupted(ctx: any, ids: string[]): Promise<void>;
+export declare function resumeInterrupted(ctx: any, ids: string[]): Promise<string[]>;
+export declare function createResumeRpcHandler(ctx: any, opts?: {
+    resumeInterrupted?: typeof resumeInterrupted;
+    config?: SupervisorPluginConfig;
+}): (endpoint: string, payload: unknown, _signal: AbortSignal) => Promise<{
+    ok: boolean;
+    value: import("./resume.js").ResumeResult;
+    error?: undefined;
+} | {
+    ok: boolean;
+    error: {
+        code: string;
+        message: string;
+    };
+    value?: undefined;
+} | {
+    ok: boolean;
+    value: {
+        resumed: string[];
+    };
+    error?: undefined;
+}>;
 export declare function apply(ctx: any, config?: SupervisorPluginConfig): void;
