@@ -154,11 +154,84 @@ export async function runAutoResume(
   }
 }
 
+async function repairEmptyBashCalls(sessionId: string, ctx: any): Promise<void> {
+  try {
+    const { execSync } = await import('node:child_process')
+    const { homedir } = await import('node:os')
+    const { join } = await import('node:path')
+    const fs = await import('node:fs')
+    const { zstdCompress } = await import('node:zlib')
+    const { promisify } = await import('node:util')
+    const { constants } = await import('node:zlib')
+    const zstdCompressAsync: any = promisify(zstdCompress)
+    const root = join(homedir(), '.dsh/sessions')
+    let foundPath: string | undefined
+    for (const proj of fs.readdirSync(root)) {
+      const p = join(root, proj, sessionId, 'session.jsonl.zstd')
+      try { if (fs.statSync(p).isFile()) { foundPath = p; break } } catch {}
+      try {
+        for (const sessDir of fs.readdirSync(join(root, proj))) {
+          const cand = join(root, proj, sessDir, 'session.jsonl.zstd')
+          try { if (fs.existsSync(cand) && fs.readFileSync(cand).slice(0, 500).toString().includes(sessionId)) { foundPath = cand; break } } catch {}
+        }
+      } catch {}
+      if (foundPath) break
+    }
+    if (!foundPath) return
+    // Decompress via zstd CLI (handles concatenated frames)
+    let text: string
+    try { text = execSync(`zstd -d -c ${JSON.stringify(foundPath)}`, { encoding: 'utf8', maxBuffer: 100 * 1024 * 1024 }) } catch { return }
+    const lines = text.split('\n').filter((l: string) => l.trim().length > 0)
+    if (!lines.length) return
+    let header: any
+    try { header = JSON.parse(lines[0]) } catch { return }
+    if (header?.type !== 'session') return
+    const events: any[] = []
+    const toRemove = new Set<number>()
+    for (let i = 1; i < lines.length; i++) {
+      try { events.push(JSON.parse(lines[i])) } catch { toRemove.add(i - 1) }
+    }
+    // Find empty bash calls (arguments === "{}" or empty object)
+    for (let i = 0; i < events.length; i++) {
+      const e: any = events[i]
+      if (e?.type === 'tool/call' && e?.data?.name === 'bash') {
+        const args = e.data?.arguments
+        let isEmpty = false
+        if (typeof args === 'string') { try { isEmpty = Object.keys(JSON.parse(args)).length === 0 } catch { isEmpty = args.trim() === '{}' } }
+        else if (typeof args === 'object' && args !== null) isEmpty = Object.keys(args as any).length === 0
+        if (isEmpty) {
+          toRemove.add(i)
+          const cid = e.data?.callId
+          for (let j = i + 1; j < events.length; j++) {
+            const r: any = events[j]
+            if (r?.type === 'tool/result' && (r?.data?.callId === cid || r?.data?.message?.source?.callId === cid)) { toRemove.add(j); break }
+          }
+        }
+      }
+    }
+    if (toRemove.size === 0) return
+    const filtered = events.filter((_, idx) => !toRemove.has(idx))
+    const headerLine = JSON.stringify(header) + '\n'
+    const bodyLines = filtered.map((e: any) => JSON.stringify(e)).join('\n') + '\n'
+    const hf: Buffer = await zstdCompressAsync(Buffer.from(headerLine), { params: { [constants.ZSTD_c_checksumFlag]: 1 } })
+    const bf: Buffer = await zstdCompressAsync(Buffer.from(bodyLines), { params: { [constants.ZSTD_c_checksumFlag]: 1 } })
+    const out = Buffer.concat([hf, bf])
+    const bak = foundPath + '.bak-emptybash-auto.' + Date.now()
+    fs.copyFileSync(foundPath, bak)
+    fs.writeFileSync(foundPath, out)
+    ctx.logger?.info?.(`[supervisor] auto-repair: removed ${toRemove.size} empty bash calls for ${sessionId} (bak ${bak})`)
+  } catch (e: any) {
+    ctx.logger?.warn?.(`[supervisor] auto-repair empty bash failed for ${sessionId}: ${e?.message ?? String(e)}`)
+  }
+}
+
 export async function resumeInterrupted(ctx: any, ids: string[]): Promise<string[]> {
   const resumed: string[] = []
   for (const id of ids) {
     try {
       const sessionId = id.split('/').pop()!
+      // Auto-repair empty bash calls before resume (prevents unknown tool loop)
+      await repairEmptyBashCalls(sessionId, ctx)
       const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
       let agent = agents?.get?.(sessionId)
       if (agent === undefined) {
