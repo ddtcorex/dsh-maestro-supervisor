@@ -19,3 +19,29 @@ export function isSelfCopyError(message: string): boolean {
   const lower = message.toLowerCase()
   return lower.includes('cannot be the same') || lower.includes('subdirectory of')
 }
+
+// Coordination contract with dsh-safe-web-update's restart-dsh-web.sh (see
+// <workspace-root>/docs/specs/2026-08-28-supervisor-planned-restart-design.md):
+// that script writes this marker right before it intentionally takes dsh-web
+// down, so the supervisor's own health poll does not mistake a deliberate
+// restart (kill -> dry-boot -> relaunch, up to ~130s) for a crash and race it
+// with its own rollback + restartWeb(). Presence + freshness is authoritative;
+// the marker's content is never parsed.
+export const PLANNED_RESTART_TTL_MS = 180_000
+
+export function isPlannedRestartFresh(mtimeMs: number, nowMs: number, ttlMs: number = PLANNED_RESTART_TTL_MS): boolean {
+  return nowMs - mtimeMs < ttlMs
+}
+
+export async function checkPlannedRestart(markerPath?: string): Promise<boolean> {
+  try {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const os = await import('node:os')
+    const p = markerPath ?? path.join(os.homedir(), '.dsh/.supervisor/planned-restart')
+    const stat = fs.statSync(p)
+    return isPlannedRestartFresh(stat.mtimeMs, Date.now())
+  } catch {
+    return false
+  }
+}
