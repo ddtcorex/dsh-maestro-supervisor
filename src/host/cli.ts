@@ -146,9 +146,9 @@ Commands:
       },
       restartWeb: async () => {
         const { execSync } = await import('node:child_process')
-        // Kill stale MainThread holding 3080/3000 before any restart attempt
+        // Kill stale MainThread holding 3080 before any restart attempt
         // (EADDRINUSE crash leaves old pid alive with http 200; new start would fail)
-        // Scoped to :3080/:3000 only — an unfiltered `ss -tlnp` matches every
+        // Scoped to :3080 only — an unfiltered `ss -tlnp` matches every
         // listening process on the host, not just dsh web (regression: killed
         // unrelated services like redis/horizon on every restart).
         try {

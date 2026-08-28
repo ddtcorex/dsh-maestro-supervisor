@@ -102,7 +102,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     }
   }
   if (logError) {
-    // EADDRINUSE is fatal even with http 200 — old process still holds 3080/3000
+    // EADDRINUSE is fatal even with http 200 — old process still holds 3080
     // and new start failed; treat as FULL down so supervisor kills + restarts.
     const lowerErr = logError.toLowerCase()
     const isFatalPortError = lowerErr.includes('eaddrinuse') || lowerErr.includes('address already in use')
