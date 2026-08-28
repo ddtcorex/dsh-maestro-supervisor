@@ -206,6 +206,7 @@ DSH_INTEGRATION=1 pnpm test -- tests/integration.test.ts  # needs real DSH web
 - One TDD task = one commit; never commit while `pnpm verify` is red.
 - When the base moves, rebase the feature branch onto `origin/master`.
 - `lib/` is committed — rebuild before committing.
+- **Always request approval before merge or release:** never merge a PR/MR or publish a release (`git tag`/`pnpm publish`/`gh release`) without an explicit human `APPROVED` — request review (`gh pr ready` / `gh pr request-review` / ask in chat) and wait for `APPROVED`.
 
 ## Conventions
 
