@@ -57,9 +57,12 @@ describe('resumeInterrupted', () => {
     expect(resumeAgent).toHaveBeenCalledWith({ resumeSessionId: 'session-abc' })
     expect(followup).toHaveBeenCalledTimes(1)
     const sentMessage = followup.mock.calls[0][0]
-    expect(sentMessage.content).toEqual([{ type: 'text', text: 'continue' }])
+    // Recovery prompt must mention interruption + bash verification (repair.ts:104 TOOL_OUTCOME_UNKNOWN)
+    expect(sentMessage.content[0].text).toContain('interrupted')
+    expect(sentMessage.content[0].text).toContain('bash')
+    expect(sentMessage.content[0].text).toContain('TOOL_OUTCOME_UNKNOWN')
     expect(sentMessage.source).toEqual({ kind: 'user' })
-    expect(ctx._logs.some((l: string) => l.includes('sent continue trigger'))).toBe(true)
+    expect(ctx._logs.some((l: string) => l.includes('sent recovery continue'))).toBe(true)
   })
 
   it('restores the persisted provider and model when resuming an agent', async () => {

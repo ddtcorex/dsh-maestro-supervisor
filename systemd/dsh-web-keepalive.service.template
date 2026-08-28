@@ -1,0 +1,12 @@
+[Unit]
+Description=Keepalive for user manager linger — prevents systemd --user exit on manager session close
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sleep infinity
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

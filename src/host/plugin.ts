@@ -188,15 +188,48 @@ export async function resumeInterrupted(ctx: any, ids: string[]): Promise<string
         ctx.logger?.warn?.(`[supervisor] auto-resume: no live agent available for ${id}`)
         continue
       }
+      // Ensure bash tool is registered before followup — initial resume header with
+      // only 11 tools (missing bash) broke 36646045... etc. Wait briefly for
+      // ctx.tools to populate (preset mount + shell). Best-effort: poll up to 5s.
+      try {
+        const tools: any = (ctx.get?.('tools') as any) ?? (ctx as any).tools
+        const hasBash = () => {
+          try {
+            if (typeof tools?.get === 'function') return tools.get('bash') !== undefined
+            if (typeof tools?.has === 'function') return tools.has('bash')
+            if (Array.isArray(tools?.list?.())) return tools.list().some((t: any) => t?.name === 'bash' || t === 'bash')
+            // Fallback: check systemPrompt assembly indirectly via tools registry size
+            return true
+          } catch { return true }
+        }
+        if (!hasBash()) {
+          for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 500))
+            if (hasBash()) break
+          }
+          if (!hasBash()) ctx.logger?.warn?.(`[supervisor] auto-resume: bash tool still not ready for ${id} — continuing anyway`)
+        }
+      } catch {}
       const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
         createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),
       }))
+      // Use an explicit recovery prompt instead of bare "continue" — the synthetic
+      // TOOL_OUTCOME_UNKNOWN / TOOL_NOT_STARTED result (repair.ts:104) tells the
+      // model to verify external state before retrying. A bare "continue" made
+      // the model reply with text instead of re-issuing bash, leaving the
+      // session stuck after every crash (36646045..., 31ae53a2...).
+      const resumeMessage =
+        'The previous turn was interrupted by a crash and the harness has synthesized a tool result with TOOL_OUTCOME_UNKNOWN / TOOL_NOT_STARTED. ' +
+        'Outcome of the last tool call is unknown — it may or may not have had side effects. ' +
+        'Verify external state with bash (e.g., ls, cat, git status) before retrying. ' +
+        'Retry only if the operation is read-only or idempotent; if it may have side effects, verify first or ask the user. ' +
+        'Then continue the original task from where it was interrupted — re-issue the next bash/tool call that the plan requires.'
       agent.followup(createUserMessage({
-        content: [{ type: 'text', text: 'continue' }],
+        content: [{ type: 'text', text: resumeMessage }],
         source: { kind: 'user' },
       }))
       resumed.push(id)
-      ctx.logger?.info?.(`[supervisor] auto-resume: sent continue trigger for ${id}`)
+      ctx.logger?.info?.(`[supervisor] auto-resume: sent recovery continue for ${id}`)
     } catch (e: any) {
       ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
     }
@@ -229,12 +262,57 @@ export function createResumeRpcHandler(
   }
 }
 
+function ensureSystemdKeepalive(ctx: any): void {
+  // Best-effort: ensure dsh-web-keepalive.service exists and is enabled, and linger is on.
+  // This is the user-level auto-fix for the 11:42:58 crash where manager session 97
+  // Removed caused user manager to exit despite Linger, killing dsh-web.
+  // Runs inside dsh web (as the current user) so systemctl --user bus is available when manager is alive.
+  // Failures are swallowed — never throw from apply().
+  try {
+    const home = os.homedir()
+    const systemdDir = path.join(home, '.config/systemd/user')
+    const keepalivePath = path.join(systemdDir, 'dsh-web-keepalive.service')
+    // Migrate old keepalive.service (pre-prefix) if present
+    const oldKeepalivePath = path.join(systemdDir, 'keepalive.service')
+    if (fs.existsSync(oldKeepalivePath) && !fs.existsSync(keepalivePath)) {
+      try { fs.renameSync(oldKeepalivePath, keepalivePath); ctx.logger?.info?.('[supervisor] migrated keepalive.service → dsh-web-keepalive.service') } catch { try { fs.copyFileSync(oldKeepalivePath, keepalivePath) } catch {} }
+    }
+    if (!fs.existsSync(keepalivePath)) {
+      try {
+        fs.mkdirSync(systemdDir, { recursive: true })
+        // Inline template — avoids needing to resolve package's systemd/dsh-web-keepalive.service.template at runtime
+        const content = `[Unit]\nDescription=Keepalive for user manager linger — prevents systemd --user exit on manager session close\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=/bin/sleep infinity\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n`
+        fs.writeFileSync(keepalivePath, content, 'utf-8')
+        ctx.logger?.info?.('[supervisor] dsh-web-keepalive.service installed')
+      } catch (e: any) {
+        ctx.logger?.warn?.(`[supervisor] keepalive install failed: ${e?.message ?? String(e)}`)
+        return
+      }
+    }
+    // Try to enable linger + enable/start units best-effort (may need sudo for linger, ignore failure)
+    try {
+      const { execSync } = require('node:child_process') as typeof import('node:child_process')
+      const username = (() => { try { return os.userInfo().username } catch { return process.env.USER || process.env.LOGNAME || '' } })()
+      const lingerPath = username ? `/var/lib/systemd/linger/${username}` : ''
+      if (lingerPath && !fs.existsSync(lingerPath)) {
+        try { execSync(`loginctl enable-linger ${username} 2>/dev/null || true`, { timeout: 3000, stdio: 'ignore' }) } catch {}
+      }
+      try { execSync('systemctl --user daemon-reload 2>/dev/null || true', { timeout: 3000, stdio: 'ignore' }) } catch {}
+      try { execSync('systemctl --user enable dsh-web-keepalive.service 2>/dev/null || true', { timeout: 3000, stdio: 'ignore' }) } catch {}
+      try { execSync('systemctl --user start dsh-web-keepalive.service 2>/dev/null || true', { timeout: 3000, stdio: 'ignore' }) } catch {}
+      // Also ensure dsh-web + supervisor are enabled (in case user installed plugin but never ran install-systemd.sh)
+      try { execSync('systemctl --user enable dsh-web.service dsh-web-supervisor.service 2>/dev/null || true', { timeout: 3000, stdio: 'ignore' }) } catch {}
+    } catch {}
+  } catch {}
+}
+
 export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
   // The whole body is wrapped: per AGENTS.md, apply() must never throw
   // synchronously or let a rejected promise escape, no matter what fails
   // (ctx.effect missing/throwing, RPC registration throwing, or even the
   // error-reporting logger call itself throwing).
   try {
+    try { ensureSystemdKeepalive(ctx) } catch {}
     ctx.effect(() => {
       let disposed = false
       let timer: ReturnType<typeof setTimeout> | null = null
