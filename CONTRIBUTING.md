@@ -1,23 +1,23 @@
-# Contributing to maestro-skills
+# Contributing to dsh-maestro-supervisor
 
-Thank you for contributing to **maestro-skills** (`@ddtcorex/maestro-skills`) — a unified skills library for AI coding agents (Magento 2 / Govard / superpowers), packaged as a Cordis plugin for DeepSeek Harness and as a Claude Code / Codex CLI plugin.
+Thank you for contributing to **dsh-maestro-supervisor** (`@ddtcorex/dsh-maestro-supervisor`) — Supervisor for DSH Web resilience: standalone daemon (polls `:3080` every 3s, LKG snapshots, auto-rollback, reports) plus in-tree host plugin (auto-resume interrupted sessions) and client plugin (hybrid auto-reload), packaged as a Cordis plugin + `dsh-web-supervisor` binary.
 
 ## Getting Started
 
-1. **Fork and clone** `github.com/ddtcorex/maestro-skills`.
-2. Install dependencies (requires Node.js 20+, pnpm 10+):
+1. **Fork and clone** `github.com/ddtcorex/dsh-maestro-supervisor`.
+2. Install dependencies (requires Node.js 22+, pnpm 11+):
 
    ```bash
    pnpm install
    ```
 
-3. Build the Cordis plugin (TypeScript → `lib/`):
+3. Build the Cordis plugin (TypeScript → `lib/` + `lib/client.js`):
 
    ```bash
-   pnpm build        # runs tsc
+   pnpm build        # tsc host + tsc client + node scripts/build-client.mjs -> lib/ + lib/client.js
    ```
 
-4. Open the project in your editor. Each skill lives at `skills/<name>/SKILL.md` — the single source of truth. Do not create duplicate copies or symlinks.
+4. Open the project in your editor. Host logic lives in `src/host/`, client auto-reload in `src/client/auto-reload.ts`, tests in `tests/`. `lib/` is committed build output — do not hand-edit. `lib/client.js` is the browser bundle (`window.__ModuleLoader__.load` wrapper).
 
 ## Superpowers 3-Phase Workflow (AGENTS.md)
 
@@ -34,7 +34,7 @@ Do not skip ahead to implementation and do not bundle multiple TDD tasks into on
 Never commit directly to `master`. Start a feature branch per work session:
 
 - `fix/<topic>` — bug fixes
-- `feat/<topic>` — new features / new skills
+- `feat/<topic>` — new features
 - `docs/<topic>` — documentation-only changes
 
 Rebase (not merge) when the base moves: `git fetch origin && git rebase origin/master`.
@@ -52,7 +52,7 @@ Refs: #<issue>
 ```
 
 - **Types (closed list):** `feat` `fix` `docs` `chore` `refactor` `perf` `test` `build` `ci` `revert`
-- **Scope:** optional, without the `dsh-maestro-` prefix — e.g. `feat(skills):`, `fix(frontmatter):`, `docs(readme):`
+- **Scope:** optional, without the `dsh-maestro-` prefix — e.g. `feat(supervisor):`, `fix(resume):`, `docs(readme):`
 - **Subject:** imperative, lowercase first word, ≤ 72 chars, no trailing period
 - **Body:** explain *why* and trade-offs when non-trivial
 - **Breaking changes:** `feat!: <subject>` plus a `BREAKING CHANGE:` footer
@@ -64,24 +64,17 @@ One TDD task = one commit while executing a plan; squash at merge time if the hi
 Run these before opening a PR (match depth to risk):
 
 ```bash
-pnpm verify      # typecheck — tsc --noEmit (add a verify script if missing: "verify": "tsc --noEmit")
-pnpm test        # vitest run
-pnpm build       # tsc — ensures lib/ is not stale
+pnpm verify      # tsc --noEmit host + tsc -p tsconfig.client.json --noEmit
+pnpm test        # vitest run (13 files, 82 tests)
+pnpm build       # tsc host + client && node scripts/build-client.mjs -> lib/ + lib/client.js
+test -f lib/index.js && test -f lib/client.js && echo "build ok"
 ```
 
-Additional checks when relevant:
+After touching the client bundle, verify on live DSH Web (`:3080`), not just curl/grep. Check the loopback RPC and auto-reload:
 
 ```bash
-# Plugin manifests
-claude plugin validate . --strict
-claude --plugin-dir . plugin details maestro-skills
-
-# install.sh
-bash -n install.sh
-bash install.sh --help
-
-# Superpowers fork sync (only when updating the fork)
-scripts/sync-superpowers.sh
+curl -s http://127.0.0.1:3080/dsh-maestro-supervisor-resume/scan -X POST -H 'content-type: application/json' -d '{"type":"client-request","rpcId":"t","method":"scan","payload":{"withinMs":300000}}' | head -c 200
+curl -s http://127.0.0.1:3080/plugins/@ddtcorex/dsh-maestro-supervisor/client.js | grep -c "window.location.reload"  # 2
 ```
 
 Do not claim verified/done/clean without having actually run the checks — be ready to paste exact command output in the PR.
@@ -95,7 +88,18 @@ Do not claim verified/done/clean without having actually run the checks — be r
 
 ## Package Visibility
 
-This package is public (`"private": false` — field omitted, defaults to public on npm). Never set `"private": true` in `package.json`. Publishing uses `pnpm publish --access public`.
+This package is public (`"private": false`). Never set `"private": true` in `package.json`. Publishing uses `pnpm publish --access public`.
+
+## Public Word Blacklist
+
+This repo is public — never put private project/client names or host paths into source, tests, docs, or commit messages. The single source for blacklisted words is at the meta root `docs/PUBLIC_WORD_BLACKLIST.md` (not copied into this repo — that would publish the private names). Before pushing a public PR, run from the meta root:
+
+```bash
+node scripts/check-public-blacklist.mjs        # must be ✅ 0 hits
+node scripts/check-public-blacklist.mjs --suggest  # review new suspects
+```
+
+Replace any hit with the placeholder from that doc (`example-project`, `<workspace-root>/...`, `example.test`).
 
 ## Code of Conduct
 
@@ -105,7 +109,7 @@ This project follows the [Contributor Covenant Code of Conduct](./CODE_OF_CONDUC
 
 - General questions: open a GitHub Discussion or issue.
 - Contact maintainer: [kaido4492@gmail.com](mailto:kaido4492@gmail.com)
-- Security vulnerabilities: use GitHub's private advisory reporting at `https://github.com/ddtcorex/maestro-skills/security/advisories` — do not file a public issue.
+- Security vulnerabilities: use GitHub's private advisory reporting at `https://github.com/ddtcorex/dsh-maestro-supervisor/security/advisories` — do not file a public issue.
 
 ## License
 

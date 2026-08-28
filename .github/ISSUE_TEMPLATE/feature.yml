@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest a new skill or improvement to maestro-skills.
+description: Suggest a new feature or improvement to dsh-maestro-supervisor.
 labels: [enhancement]
 body:
   - type: markdown
@@ -13,10 +13,10 @@ body:
     attributes:
       label: Area
       options:
-        - New skill
-        - Existing skill improvement
+        - Supervisor daemon / resilience
+        - Auto-resume / session recovery
+        - Client auto-reload
         - Cordis plugin / DSH preset
-        - install.sh / marketplace manifests
         - Documentation / DX
         - Other
     validations:
@@ -34,7 +34,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: Describe your preferred solution. Include skill name, scope, and example usage if applicable.
+      description: Describe your preferred solution. Include scope and example usage if applicable.
     validations:
       required: true
 
