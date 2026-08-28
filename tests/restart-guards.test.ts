@@ -2,6 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { buildKillStalePortsCommand } from '../src/host/restart-guards.js'
 
 describe('buildKillStalePortsCommand', () => {
+  it('only kills :3080, never :3000', () => {
+    const cmd = buildKillStalePortsCommand()
+    expect(cmd).toContain('sport = :3080')
+    expect(cmd).not.toContain('sport = :3000')
+  })
+
   it('scopes the ss filter to the given ports only', () => {
     const cmd = buildKillStalePortsCommand([3080, 3000])
     expect(cmd).toContain('sport = :3080')
@@ -16,10 +22,10 @@ describe('buildKillStalePortsCommand', () => {
     expect(cmd).not.toMatch(/ss -tlnp\s+2>\/dev\/null \| sed/)
   })
 
-  it('defaults to the dsh web port pair when called with no args', () => {
+  it('defaults to the dsh web port when called with no args', () => {
     const cmd = buildKillStalePortsCommand()
     expect(cmd).toContain(':3080')
-    expect(cmd).toContain(':3000')
+    expect(cmd).not.toContain(':3000')
   })
 })
 
