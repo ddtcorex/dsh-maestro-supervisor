@@ -5,7 +5,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot, resolveDeepseekHarnessDir } from './paths.js'
-import { buildKillStalePortsCommand, isSelfCopyError } from './restart-guards.js'
+import { buildKillStalePortsCommand, isSelfCopyError, checkPlannedRestart } from './restart-guards.js'
 
 export async function runCli(args: string[]): Promise<void> {
   const cmd = args[2] ?? '--help'
@@ -177,6 +177,7 @@ Commands:
         }
       },
       notify: async (msg) => console.log(`[notify] ${msg}`),
+      isPlannedRestartActive: () => checkPlannedRestart(),
       intervalMs: 3000,
     })
     supervisor.start()

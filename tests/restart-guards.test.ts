@@ -42,3 +42,20 @@ describe('isSelfCopyError', () => {
     expect(isSelfCopyError('ENOENT: no such file or directory')).toBe(false)
   })
 })
+
+describe('isPlannedRestartFresh', () => {
+  it('is fresh when mtime is recent', async () => {
+    const { isPlannedRestartFresh } = await import('../src/host/restart-guards.js')
+    expect(isPlannedRestartFresh(1000, 1000 + 60_000, 180_000)).toBe(true)
+  })
+
+  it('is stale once mtime is older than the TTL', async () => {
+    const { isPlannedRestartFresh } = await import('../src/host/restart-guards.js')
+    expect(isPlannedRestartFresh(0, 200_000, 180_000)).toBe(false)
+  })
+
+  it('treats the exact TTL boundary as stale (strictly less-than)', async () => {
+    const { isPlannedRestartFresh } = await import('../src/host/restart-guards.js')
+    expect(isPlannedRestartFresh(0, 180_000, 180_000)).toBe(false)
+  })
+})

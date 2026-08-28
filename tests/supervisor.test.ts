@@ -138,6 +138,53 @@ describe('supervisor', () => {
     expect(rollback).not.toHaveBeenCalled()
   })
 
+  it('does not treat down as a crash while a planned restart is active', async () => {
+    // Coordination with dsh-safe-web-update's restart-dsh-web.sh: an
+    // intentional restart can hold the port down far longer than any
+    // consecutive-down threshold tuned for a real crash. See
+    // docs/specs/2026-08-28-supervisor-planned-restart-design.md.
+    const rollback = vi.fn(async () => {})
+    const restartWeb = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'aborted' }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback,
+      restartWeb,
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      downThreshold: 1,
+      isPlannedRestartActive: async () => true,
+    })
+    await s.tick()
+    await s.tick()
+    await s.tick()
+    expect(rollback).not.toHaveBeenCalled()
+    expect(restartWeb).not.toHaveBeenCalled()
+  })
+
+  it('resumes normal crash handling once the planned-restart marker is gone', async () => {
+    let planned = true
+    const rollback = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'aborted' }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback,
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      downThreshold: 1,
+      isPlannedRestartActive: async () => planned,
+    })
+    await s.tick()
+    expect(rollback).not.toHaveBeenCalled()
+    planned = false
+    await s.tick()
+    expect(rollback).toHaveBeenCalledTimes(1)
+  })
+
   it('does not rollback when already rolling back', async () => {
     let resolvers: (() => void)[] = []
     const rollback = vi.fn(async () => new Promise<void>(r => resolvers.push(r)))

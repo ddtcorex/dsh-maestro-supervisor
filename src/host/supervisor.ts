@@ -24,6 +24,11 @@ export interface SupervisorDeps {
   // daemon's 3s interval, ~9s of continuous down before acting).
   downThreshold?: number
   getTime?: () => number
+  // Checks the dsh-safe-web-update marker (see
+  // docs/specs/2026-08-28-supervisor-planned-restart-design.md): a down poll
+  // while this resolves true is an intentional restart in progress, not a
+  // crash — skip rollback/restartWeb entirely rather than racing it.
+  isPlannedRestartActive?: () => Promise<boolean>
   // injectable for test / LLM wiring
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
   findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
@@ -286,6 +291,17 @@ export class Supervisor {
         }
       }
       return
+    }
+
+    // Down while an intentional restart (e.g. dsh-safe-web-update) is in
+    // flight is expected, not a crash — never race it with our own
+    // rollback/restartWeb.
+    if (this.deps.isPlannedRestartActive) {
+      const planned = await this.deps.isPlannedRestartActive().catch(() => false)
+      if (planned) {
+        this.consecutiveDown = 0
+        return
+      }
     }
 
     // Down — require consecutive confirmations before treating as a crash.
