@@ -43,7 +43,8 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   try {
     const res = await fetchFn()
     httpCode = res.status
-    if (res.status !== 200) {
+    // 401 is healthy: dsh web is up but requires browser token (since 0.1.2). Only 5xx / network errors are down.
+    if (res.status !== 200 && res.status !== 401) {
       fetchError = `http ${res.status}`
     }
   } catch (e: any) {
