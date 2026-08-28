@@ -58,6 +58,7 @@ describe('supervisor — debug-agent LLM integration', () => {
       runDebugAgent,
       findInterrupted: async () => ({ scanned: 3, interrupted: ['sess1'] }),
       debounceMs: 0,
+      downThreshold: 1,
       intervalMs: 10,
     })
     await s.tick()
