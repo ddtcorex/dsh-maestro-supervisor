@@ -66,11 +66,76 @@ describe('supervisor', () => {
       notify: vi.fn(async () => {}),
       intervalMs: 10,
       debounceMs: 60000,
+      downThreshold: 1, // this test is about debounce, not the consecutive-failure threshold
     })
     await s.tick()
     await s.tick() // second tick within debounce should not rollback again
     expect(rollback).toHaveBeenCalledTimes(1)
     expect(writeReport).toHaveBeenCalled()
+  })
+
+  it('does not rollback on a single transient down poll', async () => {
+    // Regression: a lone fetch timeout / AbortError during a slow boot was
+    // being treated as a confirmed crash on the very first bad poll, which
+    // then re-triggered restartWeb() and its own transient errors — a
+    // self-sustaining restart loop. Require consecutive confirmations.
+    const rollback = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'This operation was aborted' }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback,
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      downThreshold: 3,
+    })
+    await s.tick()
+    await s.tick()
+    expect(rollback).not.toHaveBeenCalled()
+  })
+
+  it('rollbacks once downThreshold consecutive down polls are seen', async () => {
+    const rollback = vi.fn(async () => {})
+    const notify = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'This operation was aborted' }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback,
+      notify,
+      intervalMs: 10,
+      downThreshold: 3,
+    })
+    await s.tick()
+    await s.tick()
+    expect(rollback).not.toHaveBeenCalled()
+    await s.tick()
+    expect(rollback).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets the consecutive-down count when health recovers between down polls', async () => {
+    const states: Array<{ up: boolean; error?: string }> = [
+      { up: false, error: 'aborted' },
+      { up: false, error: 'aborted' },
+      { up: true, httpCode: 200 } as any, // recovers before hitting the threshold
+      { up: false, error: 'aborted' },
+      { up: false, error: 'aborted' },
+    ]
+    const rollback = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => states.shift() as any,
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback,
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      downThreshold: 3,
+    })
+    for (let i = 0; i < states.length; i++) await s.tick()
+    expect(rollback).not.toHaveBeenCalled()
   })
 
   it('does not rollback when already rolling back', async () => {
@@ -84,6 +149,7 @@ describe('supervisor', () => {
       rollback,
       notify: vi.fn(async () => {}),
       intervalMs: 10,
+      downThreshold: 1,
     })
     const p1 = s.tick()
     const p2 = s.tick()

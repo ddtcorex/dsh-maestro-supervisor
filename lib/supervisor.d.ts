@@ -21,6 +21,7 @@ export interface SupervisorDeps {
     notify: (msg: string) => Promise<void>;
     intervalMs?: number;
     debounceMs?: number;
+    downThreshold?: number;
     getTime?: () => number;
     runDebugAgent?: (opts: {
         reportPath: string;
@@ -46,6 +47,7 @@ export declare class Supervisor {
     private rollingBack;
     private lastLKGWrite;
     private lastDegradedNotify;
+    private consecutiveDown;
     private timer;
     constructor(deps: SupervisorDeps);
     private getRunDebugAgent;

@@ -16,6 +16,13 @@ export interface SupervisorDeps {
   notify: (msg: string) => Promise<void>
   intervalMs?: number
   debounceMs?: number
+  // Number of consecutive "down" polls required before a crash is confirmed
+  // and rollback/restart fires. A single transient poll failure (e.g. a
+  // fetch timeout while the plugin tree is still booting) must not trigger
+  // a full rollback — that restart itself produces transient errors on the
+  // next poll, which would otherwise re-trigger endlessly. Default 3 (at the
+  // daemon's 3s interval, ~9s of continuous down before acting).
+  downThreshold?: number
   getTime?: () => number
   // injectable for test / LLM wiring
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
@@ -51,6 +58,7 @@ export class Supervisor {
   private rollingBack = false
   private lastLKGWrite = 0
   private lastDegradedNotify = 0
+  private consecutiveDown = 0
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(deps: SupervisorDeps) {
@@ -233,6 +241,7 @@ export class Supervisor {
 
     // DEGRADED: http 200 but log has plugin error → report, notify, no rollback
     if (health.degraded) {
+      this.consecutiveDown = 0
       const now = this.deps.getTime ? this.deps.getTime() : Date.now()
       if (now - this.lastDegradedNotify < 60000) return
       this.lastDegradedNotify = now
@@ -265,6 +274,7 @@ export class Supervisor {
     }
 
     if (health.up) {
+      this.consecutiveDown = 0
       // Throttle LKG writes to at most once per 5 minutes
       const now = this.deps.getTime ? this.deps.getTime() : Date.now()
       if (now - this.lastLKGWrite > 5 * 60 * 1000) {
@@ -278,6 +288,14 @@ export class Supervisor {
       return
     }
 
+    // Down — require consecutive confirmations before treating as a crash.
+    // A lone timed-out poll (e.g. a slow plugin-tree boot) must not trigger
+    // rollback/restart: that restart produces its own transient errors on
+    // the next poll, which would otherwise re-trigger this same path forever.
+    this.consecutiveDown++
+    const downThreshold = this.deps.downThreshold ?? 3
+    if (this.consecutiveDown < downThreshold) return
+
     // Down — check debounce and rolling state
     if (this.rollingBack) return
     const now = this.deps.getTime ? this.deps.getTime() : Date.now()
@@ -285,6 +303,7 @@ export class Supervisor {
     if (now - this.lastRollback < debounceMs) return
 
     this.rollingBack = true
+    this.consecutiveDown = 0
     this.lastRollback = now
 
     try {

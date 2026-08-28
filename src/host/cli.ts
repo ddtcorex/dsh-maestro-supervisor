@@ -5,6 +5,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot, resolveDeepseekHarnessDir } from './paths.js'
+import { buildKillStalePortsCommand, isSelfCopyError } from './restart-guards.js'
 
 export async function runCli(args: string[]): Promise<void> {
   const cmd = args[2] ?? '--help'
@@ -130,7 +131,7 @@ Commands:
             } catch {}
             fs.cpSync(srcPath, destPath, { recursive: true, force: true })
           } catch (e: any) {
-            if (String(e?.message ?? '').includes('cannot be the same')) continue
+            if (isSelfCopyError(String(e?.message ?? ''))) continue
             throw e
           }
         }
@@ -147,8 +148,11 @@ Commands:
         const { execSync } = await import('node:child_process')
         // Kill stale MainThread holding 3080/3000 before any restart attempt
         // (EADDRINUSE crash leaves old pid alive with http 200; new start would fail)
+        // Scoped to :3080/:3000 only — an unfiltered `ss -tlnp` matches every
+        // listening process on the host, not just dsh web (regression: killed
+        // unrelated services like redis/horizon on every restart).
         try {
-          execSync(`pids=$(ss -tlnp 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p' | sort -u); if [ -n "$pids" ]; then echo "[supervisor] killing stale pids $pids"; kill $pids 2>/dev/null || true; sleep 2; fi`, { timeout: 5000, stdio: 'pipe' })
+          execSync(buildKillStalePortsCommand(), { timeout: 5000, stdio: 'pipe' })
         } catch {}
         // Prefer systemd — if dsh-web.service is installed, restart/start it
         try {

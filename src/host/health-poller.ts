@@ -33,7 +33,12 @@ const ERROR_PATTERNS = [
 ]
 
 export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState> {
-  const fetchFn = opts.fetch ?? defaultFetch(opts.url ?? 'http://127.0.0.1:3080/', opts.timeoutMs ?? 5000)
+  // 5s was too tight for a busy plugin-tree boot: a lone AbortError from a slow
+  // (but otherwise fine) response was indistinguishable from a real crash, and
+  // combined with a low down-threshold this caused a self-sustaining restart
+  // loop (see Supervisor.downThreshold). 12s gives boot room without masking
+  // a genuinely dead process for long.
+  const fetchFn = opts.fetch ?? defaultFetch(opts.url ?? 'http://127.0.0.1:3080/', opts.timeoutMs ?? 12000)
   const psAliveFn = opts.psAlive ?? defaultPsAlive
   const logTailFn = opts.logTail ?? defaultLogTail
 

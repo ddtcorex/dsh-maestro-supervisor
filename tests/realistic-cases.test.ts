@@ -139,6 +139,7 @@ describe('realistic cases — supervisor rollback + report + snapshot', () => {
         },
         notify: async (msg) => { notifyMsg = msg },
         debounceMs: 0,
+        downThreshold: 1,
       })
       await s.tick()
       if (c.expectDegraded) {
