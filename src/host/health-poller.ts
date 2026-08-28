@@ -139,7 +139,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     // ignore
   }
 
-  return { up: httpCode === 200, httpCode, logTail: logContent.slice(-5000) }
+  return { up: httpCode === 200 || httpCode === 401, httpCode, logTail: logContent.slice(-5000) }
 }
 
 function defaultFetch(url: string, timeoutMs: number): () => Promise<{ status: number; text: () => Promise<string> }> {
