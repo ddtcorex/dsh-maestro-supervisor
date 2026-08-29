@@ -43,7 +43,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@ddtcorex/dsh-maestro-config-lib": "workspace:^0.1.0"
+    "@ddtcorex/dsh-maestro-config-lib": "workspace:^0.1.2"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
