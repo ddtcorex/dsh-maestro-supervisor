@@ -178,9 +178,8 @@ Commands:
       },
       notify: async (msg) => console.log(`[notify] ${msg}`),
       isPlannedRestartActive: () => checkPlannedRestart(),
-      intervalMs: 3000,
     })
-    supervisor.start()
+    await supervisor.start()
     // keep process alive
     await new Promise(() => {})
   }

@@ -5,6 +5,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot } from './paths.js'
+import { readSupervisorConfig } from './config.js'
 
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
@@ -159,6 +160,24 @@ export class Supervisor {
     return 5 * 60 * 1000 // default 5 minutes
   }
 
+  private async getEffectiveIntervalMs(): Promise<number> {
+    if (this.deps.intervalMs !== undefined) return this.deps.intervalMs
+    try {
+      const cfg = await readSupervisorConfig()
+      if (typeof (cfg as any).intervalMs === 'number' && (cfg as any).intervalMs > 0) return (cfg as any).intervalMs
+    } catch {}
+    return 3000
+  }
+
+  private async getEffectiveDownThreshold(): Promise<number> {
+    if (this.deps.downThreshold !== undefined) return this.deps.downThreshold
+    try {
+      const cfg = await readSupervisorConfig()
+      if (typeof (cfg as any).downThreshold === 'number' && (cfg as any).downThreshold > 0) return (cfg as any).downThreshold
+    } catch {}
+    return 3
+  }
+
   private async findInterruptedRecent(withinMs?: number): Promise<{ scanned: number; interrupted: string[] }> {
     const ms = withinMs ?? this.getResumeWithinMs()
     // Prefer injected mock for testability
@@ -309,7 +328,7 @@ export class Supervisor {
     // rollback/restart: that restart produces its own transient errors on
     // the next poll, which would otherwise re-trigger this same path forever.
     this.consecutiveDown++
-    const downThreshold = this.deps.downThreshold ?? 3
+    const downThreshold = await this.getEffectiveDownThreshold()
     if (this.consecutiveDown < downThreshold) return
 
     // Down — check debounce and rolling state
@@ -365,12 +384,17 @@ export class Supervisor {
     }
   }
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.timer) return
-    const intervalMs = this.deps.intervalMs ?? 3000
+    const intervalMs = await this.getEffectiveIntervalMs()
     this.timer = setInterval(() => { this.tick().catch(() => {}) }, intervalMs)
     // Immediate tick so a reboot is recovered in ~0-3s, not 3s
     this.tick().catch(() => {})
+  }
+
+  // Synchronous start wrapper for callers that do not await (daemon cli fire-and-forget)
+  startSync(): void {
+    void this.start()
   }
 
   stop(): void {

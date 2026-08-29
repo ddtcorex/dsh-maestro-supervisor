@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@ddtcorex/dsh-maestro-config-lib':
+        specifier: ^0.1.2
+        version: 0.1.2
     devDependencies:
       '@types/node':
         specifier: ^26.3.0
@@ -19,6 +23,9 @@ importers:
         version: 3.2.7(@types/node@26.3.0)
 
 packages:
+
+  '@ddtcorex/dsh-maestro-config-lib@0.1.2':
+    resolution: {integrity: sha512-z4UDTOZGZyGjwBSuCopc+cCqwZbXbSCUXZKDI/gqoq+NKTjwfXjBh21LqW6mDIxFCUraxzFahUT+HIlJ/gNDAQ==}
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -588,6 +595,8 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@ddtcorex/dsh-maestro-config-lib@0.1.2': {}
 
   '@esbuild/aix-ppc64@0.28.2':
     optional: true
