@@ -1,5 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { pollHealth } from '../src/host/health-poller.js'
+import { clearPlannedRestart } from '../src/host/restart-guards.js'
+import * as guards from '../src/host/restart-guards.js'
 
 describe('health-poller', () => {
   it('reports up when curl 200', async () => {
@@ -41,5 +43,41 @@ describe('health-poller', () => {
     expect(r.up).toBe(true)
     expect(r.degraded).toBe(true)
     expect(r.error).toContain('assertChannel')
+  })
+
+  afterEach(() => {
+    clearPlannedRestart()
+  })
+
+  it('suppress fetch failed during planned restart 30s', async () => {
+    const spy = vi.spyOn(guards, 'checkPlannedRestart').mockReturnValue(true)
+    try {
+      const res = await pollHealth({
+        fetch: async () => { throw new Error('fetch failed') },
+        logTail: async () => 'EADDRINUSE ...\ndsh web: http://127.0.0.1:3080/?token=abc',
+        psAlive: async () => true,
+      })
+      expect(res.up).toBe(true)
+      expect(res.error).toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('suppress logTail before ActiveEnter ignored', async () => {
+    // log: success at start, then EADDRINUSE just after success, then 300 ok lines.
+    // Without ActiveEnter/window filtering, lastError (EADDRINUSE) has no success after -> down.
+    // With fallback window (last 200 after last "dsh web: http"), EADDRINUSE falls outside window -> up.
+    const success = 'dsh web: http://127.0.0.1:3080/?token=abc'
+    const earlyError = 'EADDRINUSE: address already in use :::3080'
+    const tailOk = Array.from({ length: 300 }, (_, i) => `ok line ${i}`).join('\n')
+    const log = `${success}\n${earlyError}\n${tailOk}`
+    const res = await pollHealth({
+      fetch: async () => ({ status: 200, text: async () => 'ok' }) as any,
+      psAlive: async () => true,
+      logTail: async () => log,
+    })
+    expect(res.up).toBe(true)
+    expect(res.error).toBeUndefined()
   })
 })

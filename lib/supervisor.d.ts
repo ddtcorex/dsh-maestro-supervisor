@@ -23,7 +23,7 @@ export interface SupervisorDeps {
     debounceMs?: number;
     downThreshold?: number;
     getTime?: () => number;
-    isPlannedRestartActive?: () => Promise<boolean>;
+    isPlannedRestartActive?: () => boolean | Promise<boolean>;
     runDebugAgent?: (opts: {
         reportPath: string;
         health: HealthState;
