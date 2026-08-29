@@ -29,7 +29,7 @@ export interface SupervisorDeps {
   // docs/specs/2026-08-28-supervisor-planned-restart-design.md): a down poll
   // while this resolves true is an intentional restart in progress, not a
   // crash — skip rollback/restartWeb entirely rather than racing it.
-  isPlannedRestartActive?: () => Promise<boolean>
+  isPlannedRestartActive?: () => boolean | Promise<boolean>
   // injectable for test / LLM wiring
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
   findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
@@ -316,7 +316,8 @@ export class Supervisor {
     // flight is expected, not a crash — never race it with our own
     // rollback/restartWeb.
     if (this.deps.isPlannedRestartActive) {
-      const planned = await this.deps.isPlannedRestartActive().catch(() => false)
+      let planned = false
+      try { planned = await Promise.resolve(this.deps.isPlannedRestartActive()) } catch { planned = false }
       if (planned) {
         this.consecutiveDown = 0
         return

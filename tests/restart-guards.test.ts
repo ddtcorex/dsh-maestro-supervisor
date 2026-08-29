@@ -65,3 +65,21 @@ describe('isPlannedRestartFresh', () => {
     expect(isPlannedRestartFresh(0, 180_000, 180_000)).toBe(false)
   })
 })
+
+describe('planned restart marker 30s', () => {
+  it('planned restart marker 30s', async () => {
+    const { writePlannedRestart, checkPlannedRestart, clearPlannedRestart } = await import('../src/host/restart-guards.js')
+    const fs = await import('node:fs')
+    const os = await import('node:os')
+    const path = await import('node:path')
+    clearPlannedRestart()
+    expect(checkPlannedRestart()).toBe(false)
+    writePlannedRestart(30000)
+    expect(checkPlannedRestart()).toBe(true)
+    const p = path.join(os.homedir(), '.dsh/.supervisor/planned-restart.json')
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'))
+    expect(j.ttl).toBe(30000)
+    expect(typeof j.ts).toBe('number')
+    clearPlannedRestart()
+  })
+})
