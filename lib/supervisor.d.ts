@@ -56,11 +56,14 @@ export declare class Supervisor {
     private getResumeSessions;
     private getAutoResumeEnabled;
     private getResumeWithinMs;
+    private getEffectiveIntervalMs;
+    private getEffectiveDownThreshold;
     private findInterruptedRecent;
     private collectGitDiff;
     private attemptAutoResume;
     private handleDebugResult;
     tick(): Promise<void>;
-    start(): void;
+    start(): Promise<void>;
+    startSync(): void;
     stop(): void;
 }

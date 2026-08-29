@@ -42,6 +42,9 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "@ddtcorex/dsh-maestro-config-lib": "workspace:^0.1.0"
+  },
   "devDependencies": {
     "@types/node": "^26.3.0",
     "typescript": "^5.9.3",
