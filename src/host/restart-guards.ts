@@ -1,3 +1,7 @@
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import * as os from 'node:os'
+
 // Regression guard: PR #17 added a "kill stale pid holding :3080/:3000 before
 // restart" step (EADDRINUSE recovery), but the original `ss -tlnp` call had no
 // port filter — it matched every listening process on the host, so every
@@ -33,15 +37,53 @@ export function isPlannedRestartFresh(mtimeMs: number, nowMs: number, ttlMs: num
   return nowMs - mtimeMs < ttlMs
 }
 
-export async function checkPlannedRestart(markerPath?: string): Promise<boolean> {
-  try {
-    const fs = await import('node:fs')
-    const path = await import('node:path')
-    const os = await import('node:os')
-    const p = markerPath ?? path.join(os.homedir(), '.dsh/.supervisor/planned-restart')
-    const stat = fs.statSync(p)
-    return isPlannedRestartFresh(stat.mtimeMs, Date.now())
-  } catch {
-    return false
+export function plannedRestartPath(): string {
+  return path.join(os.homedir(), '.dsh/.supervisor/planned-restart.json')
+}
+
+export function writePlannedRestart(ttlMs = 30000): void {
+  const p = plannedRestartPath()
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  fs.writeFileSync(p, JSON.stringify({ ts: Date.now(), ttl: ttlMs }), { mode: 0o600 })
+  try { fs.chmodSync(p, 0o600) } catch {}
+}
+
+export function checkPlannedRestart(markerPath?: string): boolean {
+  // Legacy path explicit: check mtime of that file
+  if (markerPath) {
+    try {
+      const stat = fs.statSync(markerPath)
+      return isPlannedRestartFresh(stat.mtimeMs, Date.now())
+    } catch {
+      return false
+    }
   }
+  // New JSON marker with {ts, ttl}
+  try {
+    const raw = fs.readFileSync(plannedRestartPath(), 'utf8')
+    const j = JSON.parse(raw) as { ts?: unknown; ttl?: unknown }
+    if (typeof j.ts === 'number' && typeof j.ttl === 'number') {
+      return Date.now() - j.ts < j.ttl
+    }
+  } catch {}
+  // Fallback: legacy plain file written by dsh-safe-web-update (no .json, mtime-based)
+  try {
+    const legacy = path.join(os.homedir(), '.dsh/.supervisor/planned-restart')
+    const stat = fs.statSync(legacy)
+    return isPlannedRestartFresh(stat.mtimeMs, Date.now())
+  } catch {}
+  return false
+}
+
+export function clearPlannedRestart(): void {
+  try { fs.unlinkSync(plannedRestartPath()) } catch {}
+  // also clear legacy plain file if present (best-effort, avoids stale suppression)
+  try {
+    const legacy = path.join(os.homedir(), '.dsh/.supervisor/planned-restart')
+    if (fs.existsSync(legacy) && legacy !== plannedRestartPath()) {
+      // only remove legacy if it was created as test artifact; keep conservative
+      // but clearing both ensures checkPlannedRestart() returns false after clear
+      try { fs.unlinkSync(legacy) } catch {}
+    }
+  } catch {}
 }

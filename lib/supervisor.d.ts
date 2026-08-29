@@ -23,7 +23,9 @@ export interface SupervisorDeps {
     debounceMs?: number;
     downThreshold?: number;
     getTime?: () => number;
-    isPlannedRestartActive?: () => Promise<boolean>;
+    isPlannedRestartActive?: () => boolean | Promise<boolean>;
+    writePlannedRestart?: (ttlMs?: number) => void;
+    checkPlannedRestart?: () => boolean;
     runDebugAgent?: (opts: {
         reportPath: string;
         health: HealthState;
@@ -51,6 +53,9 @@ export declare class Supervisor {
     private consecutiveDown;
     private timer;
     constructor(deps: SupervisorDeps);
+    private getWritePlannedRestart;
+    private getCheckPlannedRestart;
+    restartWeb(): Promise<void>;
     private getRunDebugAgent;
     private getFindInterrupted;
     private getResumeSessions;

@@ -6,6 +6,8 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot } from './paths.js'
 import { readSupervisorConfig } from './config.js'
+import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart } from './restart-guards.js'
+import { buildKillStalePortsCommand } from './restart-guards.js'
 
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
@@ -29,7 +31,12 @@ export interface SupervisorDeps {
   // docs/specs/2026-08-28-supervisor-planned-restart-design.md): a down poll
   // while this resolves true is an intentional restart in progress, not a
   // crash — skip rollback/restartWeb entirely rather than racing it.
-  isPlannedRestartActive?: () => Promise<boolean>
+  isPlannedRestartActive?: () => boolean | Promise<boolean>
+  // 30s planned-restart marker (restart-guards.ts): single owner for restart
+  // decisions. Injected for tests so tick/restartWeb can be verified without
+  // touching the filesystem.
+  writePlannedRestart?: (ttlMs?: number) => void
+  checkPlannedRestart?: () => boolean
   // injectable for test / LLM wiring
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
   findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
@@ -69,6 +76,37 @@ export class Supervisor {
 
   constructor(deps: SupervisorDeps) {
     this.deps = deps
+  }
+
+  private getWritePlannedRestart(): (ttlMs?: number) => void {
+    return this.deps.writePlannedRestart ?? defaultWritePlannedRestart
+  }
+
+  private getCheckPlannedRestart(): () => boolean {
+    return this.deps.checkPlannedRestart ?? defaultCheckPlannedRestart
+  }
+
+  async restartWeb(): Promise<void> {
+    this.getWritePlannedRestart()(30000)
+    if (this.deps.restartWeb) {
+      await this.deps.restartWeb()
+      return
+    }
+    // Fallback systemctl path (mirrors cli.ts) — kept for standalone use
+    const { execSync } = await import('node:child_process')
+    try { execSync(buildKillStalePortsCommand(), { timeout: 5000, stdio: 'pipe' }) } catch {}
+    try {
+      execSync('systemctl --user is-active --quiet dsh-web.service && systemctl --user restart dsh-web.service || systemctl --user start dsh-web.service', { timeout: 15000, stdio: 'pipe' } as any)
+      return
+    } catch {}
+    try {
+      execSync('systemctl --user start dsh-web.service', { timeout: 15000, stdio: 'pipe' } as any)
+      return
+    } catch {}
+    const { resolveDeepseekHarnessDir } = await import('./paths.js')
+    const harnessRoot = resolveDeepseekHarnessDir()
+    const logPath = path.join(os.homedir(), '.dsh/dsh-web.log')
+    execSync(`setsid nohup bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; cd ${JSON.stringify(harnessRoot)} && exec node --import tsx/esm apps/cli/src/bin.ts web --no-open >> ${JSON.stringify(logPath)} 2>&1' &` as any, { timeout: 5000 })
   }
 
   private getRunDebugAgent() {
@@ -312,11 +350,23 @@ export class Supervisor {
       return
     }
 
+    // Single-owner 30s marker: planned restart in progress — suppress crash
+    // handling entirely for 30s (no writeFailed/writeReport/rollback).
+    // Check both the new JSON marker (writePlannedRestart) and the legacy
+    // isPlannedRestartActive (dsh-safe-web-update plain file) for compat.
+    let suppressedByMarker = false
+    try { suppressedByMarker = this.getCheckPlannedRestart()() } catch { suppressedByMarker = false }
+    if (suppressedByMarker) {
+      this.consecutiveDown = 0
+      return
+    }
+
     // Down while an intentional restart (e.g. dsh-safe-web-update) is in
     // flight is expected, not a crash — never race it with our own
     // rollback/restartWeb.
     if (this.deps.isPlannedRestartActive) {
-      const planned = await this.deps.isPlannedRestartActive().catch(() => false)
+      let planned = false
+      try { planned = await Promise.resolve(this.deps.isPlannedRestartActive()) } catch { planned = false }
       if (planned) {
         this.consecutiveDown = 0
         return
@@ -328,7 +378,17 @@ export class Supervisor {
     // rollback/restart: that restart produces its own transient errors on
     // the next poll, which would otherwise re-trigger this same path forever.
     this.consecutiveDown++
-    const downThreshold = await this.getEffectiveDownThreshold()
+    let downThreshold = await this.getEffectiveDownThreshold()
+    // When a planned restart marker is active, double the threshold (3→6 at
+    // 3s interval ≈ 9s→18s). Health-poller already suppresses fetch failed in
+    // this window, but supervisor also doubles so a transient that escapes
+    // health still needs longer to trigger. The early return above already
+    // suppresses fully for 30s; doubling remains for the legacy
+    // isPlannedRestartActive path and for any race where the marker was
+    // written between the early check and this line.
+    try {
+      if (this.getCheckPlannedRestart()()) downThreshold *= 2
+    } catch {}
     if (this.consecutiveDown < downThreshold) return
 
     // Down — check debounce and rolling state

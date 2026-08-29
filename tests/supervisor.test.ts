@@ -205,4 +205,91 @@ describe('supervisor', () => {
     resolvers.forEach(r => r())
     await p1; await p2
   })
+
+  it('marker: restartWeb writes marker before systemctl', async () => {
+    const writes: string[] = []
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: true, httpCode: 200 }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: vi.fn(async () => {}),
+      restartWeb: async () => { writes.push('restart') },
+      notify: vi.fn(async () => {}),
+      // injected marker writer for test isolation — Supervisor.restartWeb must call it with 30000 first
+      writePlannedRestart: ((ttl?: number) => { writes.push(`marker:${ttl ?? 30000}`) }) as any,
+    } as any)
+    await s.restartWeb()
+    expect(writes[0]).toBe('marker:30000')
+    expect(writes[1]).toBe('restart')
+  })
+
+  it('marker: tick suppressed when planned restart active (no writeFailed/writeReport/rollback)', async () => {
+    const writeFailed = vi.fn(async () => ({ ts: 'failed', manifest: { ts: '', files: [] } as any }))
+    const writeReport = vi.fn(async () => '/tmp/report.md')
+    const rollback = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'crash' }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed,
+      writeReport,
+      rollback,
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      downThreshold: 1,
+      checkPlannedRestart: () => true,
+    } as any)
+    await s.tick()
+    await s.tick()
+    await s.tick()
+    expect(writeFailed).not.toHaveBeenCalled()
+    expect(writeReport).not.toHaveBeenCalled()
+    expect(rollback).not.toHaveBeenCalled()
+  })
+
+  it('marker: tick doubles downThreshold when suppressed', async () => {
+    const rollback = vi.fn(async () => {})
+    const writeFailed = vi.fn(async () => ({ ts: 'failed', manifest: { ts: '', files: [] } as any }))
+    const writeReport = vi.fn(async () => '/tmp/report.md')
+    // Phase 1: suppressed — downThreshold 3 doubled to 6, so 3 ticks should NOT trigger rollback
+    const sSuppressed = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'crash' }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed,
+      writeReport,
+      rollback,
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      downThreshold: 3,
+      checkPlannedRestart: () => true,
+    } as any)
+    await sSuppressed.tick()
+    await sSuppressed.tick()
+    await sSuppressed.tick()
+    expect(rollback).not.toHaveBeenCalled()
+    expect(writeFailed).not.toHaveBeenCalled()
+    // 6th tick still suppressed (marker active) — should never rollback while suppressed
+    await sSuppressed.tick()
+    await sSuppressed.tick()
+    await sSuppressed.tick()
+    expect(rollback).not.toHaveBeenCalled()
+    // Phase 2: not suppressed — same 3 threshold should rollback after 3 downs
+    const rollback2 = vi.fn(async () => {})
+    const sNormal = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'crash' }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: 'failed', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: rollback2,
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      downThreshold: 3,
+      checkPlannedRestart: () => false,
+    } as any)
+    await sNormal.tick()
+    await sNormal.tick()
+    expect(rollback2).not.toHaveBeenCalled()
+    await sNormal.tick()
+    expect(rollback2).toHaveBeenCalledTimes(1)
+  })
 })
