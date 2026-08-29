@@ -1,5 +1,19 @@
+import { checkPlannedRestart } from './restart-guards.js'
+
 export interface NotifierOpts {
   send?: (msg: string) => Promise<void>
+}
+
+export async function notifyAutoRestart(
+  reason: string,
+  opts: NotifierOpts & { httpCode?: string | number; lkgId?: string; reportPath?: string } = {},
+): Promise<void> {
+  if (checkPlannedRestart()) return
+  const httpCode = (opts as any).httpCode ?? 'n/a'
+  const lkgId = (opts as any).lkgId ?? (opts as any).lkg ?? 'n/a'
+  const reportPath = (opts as any).reportPath ?? (opts as any).report ?? 'n/a'
+  const msg = `🔄 dsh web auto-restart — ${reason} — ${new Date().toISOString()} — up:${httpCode} — LKG:${lkgId} — report:${reportPath}`
+  await notify(msg, opts)
 }
 
 export async function notify(msg: string, opts: NotifierOpts = {}): Promise<void> {
