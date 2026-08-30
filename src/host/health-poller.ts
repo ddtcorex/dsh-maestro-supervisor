@@ -18,6 +18,34 @@ export function getActiveEnterMs(): number | undefined {
   return undefined
 }
 
+export function getActiveEnterWallMs(): number | undefined {
+  try {
+    const out = execSyncImpl('systemctl --user show -p ActiveEnterTimestamp dsh-web.service 2>/dev/null', { encoding: 'utf8' } as any) as unknown as string
+    const m = (out as string).match(/ActiveEnterTimestamp=(.+)/)
+    if (m) {
+      const s = m[1].trim()
+      if (!s || s === 'n/a') return undefined
+      const ms = Date.parse(s)
+      if (!Number.isNaN(ms)) return ms
+    }
+  } catch {}
+  return undefined
+}
+
+function isRecentlyStarted(opts: PollHealthOpts, wallMs?: number): boolean {
+  const now = Date.now()
+  // 30s grace after ActiveEnterTimestamp (wall clock) — covers manual systemctl start without marker
+  const wall = wallMs ?? (() => {
+    try {
+      const fn: any = (opts as any).getActiveEnterWallMs
+      if (typeof fn === 'function') return fn()
+      return getActiveEnterWallMs()
+    } catch { return undefined }
+  })()
+  if (typeof wall === 'number' && now - wall < 30000) return true
+  return false
+}
+
 export interface PollHealthOpts {
   fetch?: () => Promise<{ status: number; text: () => Promise<string> }>
   psAlive?: () => Promise<boolean>
@@ -80,6 +108,8 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   // Suppression gate: during 30s planned-restart window, boot transients are expected.
   // Fetch failures are treated as suppressed (up:true), and log scanning is windowed.
   const suppressed = checkPlannedRestart()
+  const recentlyStarted = isRecentlyStarted(opts as any)
+  const graceActive = suppressed || recentlyStarted
   // ActiveEnterTimestampMonotonic lookup — primary filter source; fallback to last success window
   let activeEnterMs: number | undefined
   try {
@@ -156,10 +186,10 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   // but original had error before success — already suppressed by windowing, no need to re-check.
 
   // Distinguish FULL (http !=200) vs DEGRADED (http 200 but log has plugin error)
-  // Suppression: during 30s planned restart, transient fetch failures are not a crash
+  // Suppression: during 30s grace (planned-restart OR recently started), transient fetch failures are not a crash
   if (fetchError) {
-    if (suppressed) {
-      // treat fetch failed as up:true suppressed (don't write error) — also doubles effective downThreshold
+    if (graceActive) {
+      // treat fetch failed / http 404 as up:true suppressed (don't write error) — also doubles effective downThreshold
       return {
         up: true,
         httpCode,
@@ -174,9 +204,9 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
       logTail: logContent.slice(-5000),
     }
   }
-  // During suppression, a windowed logError that is still present is considered stale/boot transient
+  // During grace, a windowed logError that is still present is considered stale/boot transient
   // as well — treat as up to avoid double restart. The fallback window already filters pre-restart errors.
-  if (suppressed && logError) {
+  if (graceActive && logError) {
     // Effective downThreshold doubling is handled by supervisor, but health also suppresses log tail
     return {
       up: true,

@@ -6,6 +6,7 @@ export interface HealthState {
     logTail?: string;
 }
 export declare function getActiveEnterMs(): number | undefined;
+export declare function getActiveEnterWallMs(): number | undefined;
 export interface PollHealthOpts {
     fetch?: () => Promise<{
         status: number;
