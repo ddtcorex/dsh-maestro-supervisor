@@ -8,7 +8,7 @@ const shouldRun = process.env.DSH_INTEGRATION === '1'
 describe('integration — supervisor with ephemeral DSH_HOME', () => {
   it.skipIf(!shouldRun)('detects corrupted settings and triggers report', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'integration-'))
-    const dshHome = path.join(tmp, 'dsh-home')
+    const dshHome = path.join(tmp, 'fake-home')
     fs.mkdirSync(path.join(dshHome, 'maestro'), { recursive: true })
     fs.writeFileSync(path.join(dshHome, 'maestro/settings.json'), '{ corrupted')
     // Simulate supervisor detecting failure — just verify writeLKG + report path

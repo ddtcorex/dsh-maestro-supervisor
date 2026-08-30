@@ -10,7 +10,7 @@ describe('snapshot', () => {
   let lkgRoot: string
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'snap-'))
-    dshHome = path.join(tmp, 'dsh-home')
+    dshHome = path.join(tmp, 'fake-home')
     lkgRoot = path.join(tmp, '.supervisor/lkg')
     fs.mkdirSync(path.join(dshHome, 'maestro'), { recursive: true })
     fs.writeFileSync(path.join(dshHome, 'maestro/settings.json'), JSON.stringify({ foo: 'bar' }))

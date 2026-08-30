@@ -98,7 +98,7 @@ describe('realistic cases — supervisor rollback + report + snapshot', () => {
   for (const c of cases) {
     it(`${c.id} — supervisor handles ${c.expectDegraded ? 'degraded' : 'full'}`, async () => {
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `case-${c.id}-`))
-      const dshHome = path.join(tmp, 'dsh-home')
+      const dshHome = path.join(tmp, 'fake-home')
       const lkgRoot = path.join(tmp, 'lkg')
       const failedRoot = path.join(tmp, 'failed')
       const reportsRoot = path.join(tmp, 'reports')
