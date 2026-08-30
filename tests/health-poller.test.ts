@@ -23,6 +23,22 @@ describe('health-poller', () => {
     expect(r.up).toBe(false)
   })
 
+  it('reports degraded (not down) when curl fails but the port is still listening', async () => {
+    // A busy-but-alive process (e.g. heavy webhook-triggered review work
+    // blocking dsh-web's own event loop) times out the same HTTP fetch a
+    // real crash would — but a real crash always frees the port. `psAlive`
+    // is the cheaper, non-contended corroboration that decides which one
+    // this is (see 2026-08-31 restart-loop postmortem).
+    const r = await pollHealth({
+      fetch: async () => { throw new Error('This operation was aborted') },
+      psAlive: async () => true,
+      logTail: async () => '',
+    })
+    expect(r.up).toBe(true)
+    expect(r.degraded).toBe(true)
+    expect(r.error).toContain('aborted')
+  })
+
   it('detects error in log tail', async () => {
     const r = await pollHealth({
       fetch: async () => ({ status: 200, text: async () => 'ok' }) as any,
