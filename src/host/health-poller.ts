@@ -199,6 +199,25 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
         logTail: logContent.slice(-5000),
       }
     }
+    // Corroborate with a cheap port-liveness check before declaring a crash.
+    // The HTTP fetch shares dsh-web's own event loop, so a busy-but-alive
+    // process (e.g. heavy GitLab-webhook-triggered review work) times out
+    // the same way a genuinely dead one does — but a real crash always frees
+    // the port, while `ss` does not depend on the contended event loop to
+    // answer. Downgrade to DEGRADED (still visible, still escalates after
+    // repeated ticks) instead of forcing an immediate rollback + restartWeb
+    // that would kill an in-flight review for nothing.
+    let portAlive = false
+    try { portAlive = await psAliveFn() } catch { portAlive = false }
+    if (portAlive) {
+      return {
+        up: true,
+        httpCode,
+        error: logError ? `${fetchError} + ${logError}` : fetchError,
+        degraded: true,
+        logTail: logContent.slice(-5000),
+      }
+    }
     return {
       up: false,
       httpCode,
