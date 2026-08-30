@@ -51,6 +51,7 @@ export declare class Supervisor {
     private lastLKGWrite;
     private lastDegradedNotify;
     private consecutiveDown;
+    private consecutiveDegraded;
     private timer;
     constructor(deps: SupervisorDeps);
     private getWritePlannedRestart;
