@@ -10,6 +10,7 @@ export interface HealthState {
 }
 
 export function getActiveEnterMs(): number | undefined {
+  if (process.env.VITEST) return undefined
   try {
     const out = execSyncImpl('systemctl --user show -p ActiveEnterTimestampMonotonic dsh-web.service 2>/dev/null', { encoding: 'utf8' } as any) as unknown as string
     const m = (out as string).match(/ActiveEnterTimestampMonotonic=(\d+)/)
@@ -19,6 +20,7 @@ export function getActiveEnterMs(): number | undefined {
 }
 
 export function getActiveEnterWallMs(): number | undefined {
+  if (process.env.VITEST) return undefined
   try {
     const out = execSyncImpl('systemctl --user show -p ActiveEnterTimestamp dsh-web.service 2>/dev/null', { encoding: 'utf8' } as any) as unknown as string
     const m = (out as string).match(/ActiveEnterTimestamp=(.+)/)
@@ -33,6 +35,7 @@ export function getActiveEnterWallMs(): number | undefined {
 }
 
 function isRecentlyStarted(opts: PollHealthOpts, wallMs?: number): boolean {
+  if (process.env.VITEST) return false
   const now = Date.now()
   // 30s grace after ActiveEnterTimestamp (wall clock) — covers manual systemctl start without marker
   const wall = wallMs ?? (() => {

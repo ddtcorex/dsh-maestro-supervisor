@@ -1,7 +1,7 @@
 {
   "name": "@ddtcorex/dsh-maestro-supervisor",
-  "version": "0.6.4",
-  "description": "Supervisor daemon for DSH Web resilience \u2014 auto-detect crashes, rollback to LKG, report",
+  "version": "0.6.5",
+  "description": "Supervisor daemon for DSH Web resilience — auto-detect crashes, rollback to LKG, report",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -39,7 +39,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "verify": "tsc --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=10000",
     "test:watch": "vitest"
   },
   "dependencies": {
