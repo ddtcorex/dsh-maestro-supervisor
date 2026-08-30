@@ -214,7 +214,7 @@ export class Supervisor {
       const cfg = await readSupervisorConfig()
       if (typeof (cfg as any).downThreshold === 'number' && (cfg as any).downThreshold > 0) return (cfg as any).downThreshold
     } catch {}
-    return 3
+    return 5
   }
 
   private async findInterruptedRecent(withinMs?: number): Promise<{ scanned: number; interrupted: string[] }> {
