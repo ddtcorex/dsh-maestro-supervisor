@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-08-30
+
+### Fixed
+
+- Suppress `http 404`/`fetch failed` within 30s of `ActiveEnterTimestamp` even without marker (via wall-clock check, VITEST-safe) to eliminate extra restart after manual `systemctl start`.
+- Degraded (`http 200` + plugin log error) now auto-rolls back after 3 consecutive polls (~9s) and notifies `🔄 auto-restart — degraded: <reason>`; also handles `401` with log error as degraded → down.
+- Increase `vitest` timeout to 10s for `plugin.test.ts` flaky `autoResumeWithin` case.
+
+## [0.6.5] - 2026-08-30
+
+### Fixed
+
+- Single-owner restart 30s suppression (planned-restart marker + flock) to prevent 2–3 systemd restarts per 1 client request.
+- Suppress `http 404`/`fetch failed` within 30s of `ActiveEnterTimestamp` even without marker to eliminate extra restart during boot.
+- Degraded (`http 200` + plugin log error) now auto-rolls back after 3 consecutive polls (~9s) and notifies `🔄 auto-restart — degraded: <reason>`.
+
 ## [0.6.4] - 2026-08-28
 
 ### Added
@@ -87,6 +103,8 @@ All notable changes to this project are documented in this file. Format follows
 
 - Initial release of `@ddtcorex/dsh-maestro-supervisor` — standalone daemon (`dsh-web-supervisor` binary, systemd unit), in-tree host plugin (`runAutoResume`, loopback RPC `/dsh-maestro-supervisor-resume`), and client plugin (`auto-reload.ts` via `window.__ModuleLoader__.load`). Polls `:3080` every 3s, LKG rotation (3), `sha256` verify, `df` guard, reports, Telegram notifier (loose).
 
+[0.6.6]: https://github.com/ddtcorex/dsh-maestro-supervisor/releases/tag/v0.6.6
+[0.6.5]: https://github.com/ddtcorex/dsh-maestro-supervisor/releases/tag/v0.6.5
 [0.6.4]: https://github.com/ddtcorex/dsh-maestro-supervisor/releases/tag/v0.6.4
 [0.6.2]: https://github.com/ddtcorex/dsh-maestro-supervisor/releases/tag/v0.6.2
 [0.6.1]: https://github.com/ddtcorex/dsh-maestro-supervisor/releases/tag/v0.6.1
