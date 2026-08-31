@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-01
+
+### Added
+
+- `dsh-safe-restart` skill shipped via `ctx.skills` provider — the single guidance surface for restarting/updating `dsh web` (in-session agents call `dsh_web_restart`; external agents/humans use the bundled systemd-aware `restart-dsh-web.sh` helper).
+- `dsh_web_restart` tool: dry-boot gate (copies `profiles/web` into an ephemeral DSH_HOME and boots on a temp port), restart-request marker with caller session + reason, durable intent sidecar; never restarts in-tree.
+- Supervisor daemon handles caller restart-requests: grace → `restartWeb()` → marker held until post-restart `health.up` → session scan; rollback debounce honored across the boot window.
+- In-session self-kill guard: `tools/pre-execute` denies `systemctl` restart / `pkill` / own-pid `kill` of `dsh web`, pointing to `dsh_web_restart`.
+- `StartLimitIntervalSec=60` + `StartLimitBurst=3` in the systemd unit template to stop crash loops.
+- Post-restart session scan (zstd decode) reporting torn session logs.
+
+### Changed
+
+- LKG rollback no longer restores `sessions/` (append-only live truth wins).
+- `isPluginTreeChanged` uses the snapshot `manifest.json` mtime baseline with an injectable stat reader (CI-deterministic).
+
+### Fixed
+
+- Skill provider object now carries its own `name` (`maestro-supervisor`) — without it every turn failed with `skill provider "undefined" returned skill ... for provider "maestro-supervisor"`.
+
 ## [0.6.8] - 2026-08-31
 
 ### Added
