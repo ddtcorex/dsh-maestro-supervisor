@@ -20,12 +20,12 @@ const cases = [
     expectErrorContains: 'SyntaxError',
   },
   {
-    id: 'A2-settings-invalid-schema',
-    log: 'Error: settings.json: invalid schema — missing required field',
+    id: 'A2-settings-parse-error',
+    log: 'ParseError: settings.json: invalid schema — missing required field',
     fetchStatus: 200,
     expectUp: true,
     expectDegraded: true,
-    expectErrorContains: 'JSON',
+    expectErrorContains: 'ParseError',
   },
   {
     id: 'B1-plugin-lib-missing',
