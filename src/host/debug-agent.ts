@@ -250,6 +250,7 @@ async function defaultFetchLLM(prompt: string): Promise<string> {
       body: JSON.stringify({
         model: cfg.model,
         temperature: 0.2,
+        ...(cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort, reasoningEffort: cfg.reasoningEffort } : {}),
         messages: [
           { role: 'system', content: 'You are a systematic-debugging agent for DSH Web resilience. Follow the 4 phases: root cause, pattern analysis, hypothesis, implementation. Always propose minimal single-file fix.' },
           { role: 'user', content: prompt },
@@ -291,7 +292,7 @@ async function defaultFetchLLM(prompt: string): Promise<string> {
         { role: 'user', content: prompt },
       ],
       max_output_tokens: 4000,
-      reasoning: { effort: 'low' },
+      ...(cfg.reasoningEffort ? { reasoning: { effort: cfg.reasoningEffort } } : { reasoning: { effort: 'low' } }),
     }),
   })
   if (!res2.ok) throw new Error(`LLM ${res2.status} ${await res2.text().catch(() => '')}`)
@@ -304,7 +305,7 @@ async function defaultFetchLLM(prompt: string): Promise<string> {
   return j2.choices?.[0]?.message?.content ?? JSON.stringify(j2)
 }
 
-interface LLMConfig { key: string | null; url: string; model: string }
+interface LLMConfig { key: string | null; url: string; model: string; reasoningEffort?: string }
 
 async function resolveLLMConfig(): Promise<LLMConfig> {
   // Custom AI provider: env overrides, then settings.yaml (llm-pi-ai providers, DeepSeek suggested setup), then settings.json, then defaults
@@ -321,7 +322,9 @@ async function resolveLLMConfig(): Promise<LLMConfig> {
   // Model: AI_MODEL / DEEPSEEK_MODEL / settings.json domains.supervisor.model -> domains.review.model / default
   // Supervisor has its own picker; falls back to review model for backward compat, then DSH default.
   let model = process.env.AI_MODEL ?? process.env.DEEPSEEK_MODEL ?? process.env.OPENAI_MODEL ?? null
-  if (!model) {
+  // reasoningEffort: env first, then supervisor -> review, then settings.yaml fallback
+  let reasoningEffort: string | undefined = (process.env.AI_REASONING_EFFORT ?? process.env.REASONING_EFFORT ?? null) as string | null | undefined ?? undefined
+  if (!model || !reasoningEffort) {
     try {
       const { readFileSync } = await import('node:fs')
       const { homedir } = await import('node:os')
@@ -329,17 +332,47 @@ async function resolveLLMConfig(): Promise<LLMConfig> {
       const raw = readFileSync(settingsPath, 'utf-8')
       const j = JSON.parse(raw)
       // Prefer supervisor model, fall back to review model (so old installs keep working)
-      const sup = j?.domains?.supervisor?.model?.model ?? j?.domains?.supervisor?.model
-      const rev = j?.domains?.review?.model?.model ?? j?.domains?.review?.model
-      let m: unknown = null
-      if (typeof sup === 'string') m = sup
-      else if (sup?.model && typeof sup.model === 'string') m = sup.model
-      else if (typeof rev === 'string') m = rev
-      else if (rev?.model && typeof rev.model === 'string') m = rev.model
-      if (typeof m === 'string' && m.trim() !== '') model = m as string
+      if (!model) {
+        const sup = j?.domains?.supervisor?.model?.model ?? j?.domains?.supervisor?.model
+        const rev = j?.domains?.review?.model?.model ?? j?.domains?.review?.model
+        let m: unknown = null
+        if (typeof sup === 'string') m = sup
+        else if (sup?.model && typeof sup.model === 'string') m = sup.model
+        else if (typeof rev === 'string') m = rev
+        else if (rev?.model && typeof rev.model === 'string') m = rev.model
+        if (typeof m === 'string' && m.trim() !== '') model = m as string
+      }
+      if (!reasoningEffort) {
+        // config-lib validator: model is {provider, model, reasoningEffort?} inside domains.supervisor.model / domains.review.model
+        // Support both nested object and flat legacy fallback for future compat
+        const supObj = j?.domains?.supervisor?.model
+        const revObj = j?.domains?.review?.model
+        const supEff = typeof supObj === 'object' && supObj !== null ? (supObj as any).reasoningEffort : undefined
+        const supFlat = (j?.domains?.supervisor as any)?.reasoningEffort
+        const revEff = typeof revObj === 'object' && revObj !== null ? (revObj as any).reasoningEffort : undefined
+        const revFlat = (j?.domains?.review as any)?.reasoningEffort
+        const candidate = supEff ?? supFlat ?? revEff ?? revFlat
+        if (typeof candidate === 'string' && candidate.trim() !== '') reasoningEffort = candidate.trim()
+      }
     } catch {}
   }
   if (!model) model = 'deepseek-chat'
+  // Also try settings.yaml for reasoningEffort if still missing (e.g., llm-pi-ai default reasoning)
+  if (!reasoningEffort) {
+    try {
+      const { readFileSync } = await import('node:fs')
+      const { homedir } = await import('node:os')
+      const yamlPath = `${homedir()}/.dsh/settings.yaml`
+      const yaml = readFileSync(yamlPath, 'utf-8')
+      // Look for reasoningEffort near the model id in provider blocks (future-proof; currently not in yaml)
+      const re = new RegExp(`id:\\s*${model}[\\s\\S]{0,200}reasoningEffort:\\s*(\\S+)`, 'm')
+      const m = yaml.match(re)
+      if (m) {
+        const v = m[1].trim().replace(/^["']|["']$/g, '')
+        if (v) reasoningEffort = v
+      }
+    } catch {}
+  }
 
   // If url not set via env, try to resolve from ~/.dsh/settings.yaml llm-pi-ai providers (DeepSeek suggested setup)
   if (!url) {
@@ -400,7 +433,7 @@ async function resolveLLMConfig(): Promise<LLMConfig> {
   if (!url.includes('/v1/') && !url.includes('/chat/completions')) {
     finalUrl = url.replace(/\/$/, '') + '/v1/chat/completions'
   }
-  return { key, url: finalUrl, model }
+  return { key, url: finalUrl, model, ...(reasoningEffort ? { reasoningEffort } : {}) }
 }
 
 async function resolveApiKey(): Promise<string | null> {
