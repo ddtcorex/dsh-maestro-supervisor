@@ -70,6 +70,9 @@ export async function dryBootVerify(harnessRoot: string, opts: { timeoutMs?: num
   }
 }
 
+/** Minimal file metadata the drift check reads; injectable for deterministic tests. */
+export interface FileStat { mtimeMs: number }
+
 /**
  * Whether the live plugin tree differs from the latest LKG snapshot. Two
  * signals are combined:
@@ -81,14 +84,22 @@ export async function dryBootVerify(harnessRoot: string, opts: { timeoutMs?: num
  *      byte-wise; the snapshot itself is the meaningful baseline and a rebuilt
  *      `lib/` bumps a file past it even when the manifest text is unchanged.
  *      writeLKG writes `manifest.json` LAST, so its FILE mtime is the
- *      authoritative snapshot moment (dir utimes are unreliable on CI runners);
- *      the snapshot dir mtime is only a fallback for legacy snapshots.
+ *      authoritative snapshot moment; the snapshot dir mtime is only a
+ *      fallback for legacy snapshots without a manifest.
  *
- * No LKG baseline, a missing file on either side, or any read error means
- * "changed" — the caller falls back to the dry-boot gate.
+ * `statFile` (default `statSync`) reads the metadata so tests can inject a
+ * controlled reader instead of relying on filesystem utimes (which CI runners
+ * do not reliably reflect). No LKG baseline, a missing file on either side, or
+ * any stat/read error means "changed" — the caller falls back to the dry-boot
+ * gate.
  */
-export function isPluginTreeChanged(harnessRoot: string, lkgDir = join(homedir(), '.dsh/.supervisor/lkg')): boolean {
+export function isPluginTreeChanged(
+  harnessRoot: string,
+  lkgDir = join(homedir(), '.dsh/.supervisor/lkg'),
+  opts: { statFile?: (p: string) => FileStat } = {},
+): boolean {
   void harnessRoot
+  const statFile = opts.statFile ?? ((p: string) => statSync(p))
   try {
     const entries = existsSync(lkgDir) ? readdirSync(lkgDir).sort() : []
     const latest = entries[entries.length - 1]
@@ -101,27 +112,27 @@ export function isPluginTreeChanged(harnessRoot: string, lkgDir = join(homedir()
     if (readFileSync(liveManifest, 'utf8') !== readFileSync(lkgManifest, 'utf8')) return true
     const snapshotManifest = join(lkgDir, latest, 'manifest.json')
     const baseline = existsSync(snapshotManifest)
-      ? statSync(snapshotManifest).mtimeMs
-      : statSync(join(lkgDir, latest)).mtimeMs
+      ? statFile(snapshotManifest).mtimeMs
+      : statFile(join(lkgDir, latest)).mtimeMs
     const livePlugins = join(live, 'node_modules', '@ddtcorex')
     if (existsSync(livePlugins)) {
       for (const name of readdirSync(livePlugins)) {
         const libDir = join(livePlugins, name, 'lib')
         if (!existsSync(libDir)) continue
-        if (newestFileMtime(libDir) > baseline) return true
+        if (newestFileMtime(libDir, statFile) > baseline) return true
       }
     }
     return false
   } catch { return true }
 }
 
-function newestFileMtime(dir: string): number {
+/** Newest mtime under a directory; recursion threads the injected stat reader. */
+function newestFileMtime(dir: string, statFile: (p: string) => FileStat): number {
   let newest = 0
-  for (const entry of readdirSync(dir)) {
-    const p = join(dir, entry)
-    const st = statSync(p)
-    if (st.isDirectory()) newest = Math.max(newest, newestFileMtime(p))
-    else newest = Math.max(newest, st.mtimeMs)
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name)
+    if (entry.isDirectory()) newest = Math.max(newest, newestFileMtime(p, statFile))
+    else newest = Math.max(newest, statFile(p).mtimeMs)
   }
   return newest
 }

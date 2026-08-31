@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { registerRestartTool, isPluginTreeChanged, dryBootVerify } from '../src/host/restart-tool.js'
@@ -235,13 +235,12 @@ describe('isPluginTreeChanged', () => {
     expect(isPluginTreeChanged(fakeHome)).toBe(false)
   })
 
-  it('detects a rebuilt plugin lib file newer than the LKG snapshot baseline', () => {
+  it('detects a rebuilt plugin lib file newer than the LKG snapshot baseline (injected stat reader)', () => {
     const lkgSnap = join(fakeHome, '.dsh/.supervisor/lkg/2026-01-01T00-00-00-000Z')
     const lkgWeb = join(lkgSnap, 'profiles/web')
     mkdirSync(lkgWeb, { recursive: true })
     writeFileSync(join(lkgWeb, 'package.json'), JSON.stringify({ version: '1' }))
-    // writeLKG writes manifest.json last — its FILE mtime is the authoritative
-    // snapshot moment (dir utimes are unreliable on CI runners).
+    // writeLKG writes manifest.json last — its mtime is the snapshot moment.
     writeFileSync(join(lkgSnap, 'manifest.json'), JSON.stringify({ files: [] }))
     const liveWeb = join(fakeHome, '.dsh/profiles/web')
     mkdirSync(liveWeb, { recursive: true })
@@ -249,12 +248,42 @@ describe('isPluginTreeChanged', () => {
     const libFile = join(liveWeb, 'node_modules/@ddtcorex/example-plugin/lib/plugin.js')
     mkdirSync(dirname(libFile), { recursive: true })
     writeFileSync(libFile, 'export const x = 1')
-    const past = new Date('2026-01-01T00:00:00Z').getTime()
-    const later = new Date('2026-01-05T00:00:00Z').getTime()
-    utimesSync(join(lkgSnap, 'manifest.json'), past, past) // snapshot moment baseline (file utimes)
-    utimesSync(libFile, past, past) // lib aligned with baseline → unchanged
-    expect(isPluginTreeChanged(fakeHome)).toBe(false)
-    utimesSync(libFile, later, later) // rebuilt after the snapshot
-    expect(isPluginTreeChanged(fakeHome)).toBe(true)
+
+    // Fully deterministic: the file-metadata reader is injected and backed by a
+    // controlled map — no utimesSync (CI runners do not reliably reflect
+    // utimes deltas in statSync mtimes for filesystem-backed paths).
+    const stats = new Map<string, { mtimeMs: number }>([
+      [join(lkgSnap, 'manifest.json'), { mtimeMs: 1000 }], // snapshot moment
+      [libFile, { mtimeMs: 500 }], // lib built BEFORE the snapshot → unchanged
+    ])
+    const statFile = (p: string): { mtimeMs: number } => {
+      const s = stats.get(p)
+      if (!s) throw new Error(`no fixture stat for ${p}`)
+      return s
+    }
+    expect(isPluginTreeChanged(fakeHome, undefined, { statFile })).toBe(false)
+    // lib rebuilt AFTER the snapshot (2000 > manifest 1000) → changed
+    stats.set(libFile, { mtimeMs: 2000 })
+    expect(isPluginTreeChanged(fakeHome, undefined, { statFile })).toBe(true)
+  })
+
+  it('falls back to changed when the stat reader errors on the live tree (dry-boot gate)', () => {
+    const lkgSnap = join(fakeHome, '.dsh/.supervisor/lkg/2026-01-01T00-00-00-000Z')
+    const lkgWeb = join(lkgSnap, 'profiles/web')
+    mkdirSync(lkgWeb, { recursive: true })
+    writeFileSync(join(lkgWeb, 'package.json'), JSON.stringify({ version: '1' }))
+    writeFileSync(join(lkgSnap, 'manifest.json'), JSON.stringify({ files: [] }))
+    const liveWeb = join(fakeHome, '.dsh/profiles/web')
+    mkdirSync(liveWeb, { recursive: true })
+    writeFileSync(join(liveWeb, 'package.json'), JSON.stringify({ version: '1' }))
+    const libFile = join(liveWeb, 'node_modules/@ddtcorex/example-plugin/lib/plugin.js')
+    mkdirSync(dirname(libFile), { recursive: true })
+    writeFileSync(libFile, 'export const x = 1')
+    const statFile = (p: string): { mtimeMs: number } => {
+      if (p === libFile) throw new Error('EACCES: live plugin lib unreadable')
+      if (p === join(lkgSnap, 'manifest.json')) return { mtimeMs: 1000 }
+      throw new Error(`unexpected stat ${p}`)
+    }
+    expect(isPluginTreeChanged(fakeHome, undefined, { statFile })).toBe(true)
   })
 })

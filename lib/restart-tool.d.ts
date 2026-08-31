@@ -30,6 +30,10 @@ export declare function dryBootVerify(harnessRoot: string, opts?: {
     ok: boolean;
     detail: string;
 }>;
+/** Minimal file metadata the drift check reads; injectable for deterministic tests. */
+export interface FileStat {
+    mtimeMs: number;
+}
 /**
  * Whether the live plugin tree differs from the latest LKG snapshot. Two
  * signals are combined:
@@ -41,13 +45,18 @@ export declare function dryBootVerify(harnessRoot: string, opts?: {
  *      byte-wise; the snapshot itself is the meaningful baseline and a rebuilt
  *      `lib/` bumps a file past it even when the manifest text is unchanged.
  *      writeLKG writes `manifest.json` LAST, so its FILE mtime is the
- *      authoritative snapshot moment (dir utimes are unreliable on CI runners);
- *      the snapshot dir mtime is only a fallback for legacy snapshots.
+ *      authoritative snapshot moment; the snapshot dir mtime is only a
+ *      fallback for legacy snapshots without a manifest.
  *
- * No LKG baseline, a missing file on either side, or any read error means
- * "changed" — the caller falls back to the dry-boot gate.
+ * `statFile` (default `statSync`) reads the metadata so tests can inject a
+ * controlled reader instead of relying on filesystem utimes (which CI runners
+ * do not reliably reflect). No LKG baseline, a missing file on either side, or
+ * any stat/read error means "changed" — the caller falls back to the dry-boot
+ * gate.
  */
-export declare function isPluginTreeChanged(harnessRoot: string, lkgDir?: string): boolean;
+export declare function isPluginTreeChanged(harnessRoot: string, lkgDir?: string, opts?: {
+    statFile?: (p: string) => FileStat;
+}): boolean;
 /**
  * Register the dsh_web_restart tool. Registration is fail-safe (warns, never
  * throws) and the returned function disposes the registration. `deps` are
