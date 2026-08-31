@@ -1,4 +1,5 @@
 import type { HealthState } from './health-poller.js';
+import type { RestartRequest } from './restart-guards.js';
 export interface SupervisorDeps {
     pollHealth: () => Promise<HealthState>;
     writeLKG: () => Promise<{
@@ -26,6 +27,7 @@ export interface SupervisorDeps {
     isPlannedRestartActive?: () => boolean | Promise<boolean>;
     writePlannedRestart?: (ttlMs?: number) => void;
     checkPlannedRestart?: () => boolean;
+    clearPlannedRestart?: () => void;
     runDebugAgent?: (opts: {
         reportPath: string;
         health: HealthState;
@@ -40,6 +42,8 @@ export interface SupervisorDeps {
     resumeSessions?: (ids: string[]) => Promise<{
         resumed: string[];
     }>;
+    readRestartRequest?: () => RestartRequest | undefined;
+    onRestartRequestHandled?: (req: RestartRequest) => void;
 }
 export declare function resumeViaRpc(ids: string[], fetchFn?: (url: string, init: RequestInit) => Promise<Response>): Promise<{
     resumed: string[];
@@ -53,9 +57,14 @@ export declare class Supervisor {
     private consecutiveDown;
     private consecutiveDegraded;
     private timer;
+    private restartRequestHandled;
+    private restartRequestTimer;
+    private awaitingHealthyBoot;
+    private pendingRestartRequest;
     constructor(deps: SupervisorDeps);
     private getWritePlannedRestart;
     private getCheckPlannedRestart;
+    private getClearPlannedRestart;
     restartWeb(): Promise<void>;
     private getRunDebugAgent;
     private getFindInterrupted;

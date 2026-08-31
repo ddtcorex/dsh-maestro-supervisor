@@ -6,7 +6,8 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot } from './paths.js'
 import { readSupervisorConfig } from './config.js'
-import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart } from './restart-guards.js'
+import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart, clearPlannedRestart, PLANNED_RESTART_TTL_MS } from './restart-guards.js'
+import type { RestartRequest } from './restart-guards.js'
 import { buildKillStalePortsCommand } from './restart-guards.js'
 
 export interface SupervisorDeps {
@@ -37,10 +38,18 @@ export interface SupervisorDeps {
   // touching the filesystem.
   writePlannedRestart?: (ttlMs?: number) => void
   checkPlannedRestart?: () => boolean
+  // Clears the restart-request/planned-restart marker; injectable for tests so
+  // the re-arm decision after a self-restart can be verified without fs.
+  clearPlannedRestart?: () => void
   // injectable for test / LLM wiring
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
   findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
   resumeSessions?: (ids: string[]) => Promise<{ resumed: string[] }>
+  // dsh_web_restart hand-off (restart-tool.ts): the daemon is the restart
+  // owner. Reads the caller marker and, after a ~5s grace, restarts dsh web
+  // once (single-flight per marker), notifies, then clears the marker.
+  readRestartRequest?: () => RestartRequest | undefined
+  onRestartRequestHandled?: (req: RestartRequest) => void
 }
 
 export async function resumeViaRpc(
@@ -74,6 +83,10 @@ export class Supervisor {
   private consecutiveDown = 0
   private consecutiveDegraded = 0
   private timer: ReturnType<typeof setInterval> | null = null
+  private restartRequestHandled = false
+  private restartRequestTimer: ReturnType<typeof setTimeout> | null = null
+  private awaitingHealthyBoot = false
+  private pendingRestartRequest: RestartRequest | undefined
 
   constructor(deps: SupervisorDeps) {
     this.deps = deps
@@ -85,6 +98,10 @@ export class Supervisor {
 
   private getCheckPlannedRestart(): () => boolean {
     return this.deps.checkPlannedRestart ?? defaultCheckPlannedRestart
+  }
+
+  private getClearPlannedRestart(): () => void {
+    return this.deps.clearPlannedRestart ?? clearPlannedRestart
   }
 
   async restartWeb(): Promise<void> {
@@ -302,6 +319,43 @@ export class Supervisor {
   async tick(): Promise<void> {
     const health = await this.deps.pollHealth()
 
+    // dsh_web_restart hand-off: the tool wrote a caller marker and handed the
+    // restart to the daemon (out-of-band). Honor one request per marker — one
+    // grace timer → restartWeb once → notify. The suppression marker and the
+    // single-flight latch are held until a post-restart health.up tick clears
+    // them, so the in-flight down of our own restart can never be mistaken for
+    // a crash and raced with a rollback + second restart by the crash path.
+    const restartReq = this.deps.readRestartRequest ? this.deps.readRestartRequest() : undefined
+    if (restartReq?.callerSessionId && !this.restartRequestHandled) {
+      this.restartRequestHandled = true
+      this.restartRequestTimer = setTimeout(() => {
+        void (async () => {
+          try {
+            // Debounce crash handling from the moment the restart is issued —
+            // the crash path sets lastRollback the same way. A slow boot must
+            // not be classified as a crash even after the suppression marker's
+            // own 30s TTL runs out.
+            this.lastRollback = this.deps.getTime ? this.deps.getTime() : Date.now()
+            await this.restartWeb()
+            // Supervisor.restartWeb() wrote a 30s marker; extend it past a slow
+            // boot. It is cleared only once the boot proves healthy below.
+            this.getWritePlannedRestart()(PLANNED_RESTART_TTL_MS)
+            await this.deps.notify(`restarted dsh-web after self-restart by session ${restartReq.callerSessionId}`)
+          } catch (e: any) {
+            await this.deps.notify(`self-restart dsh-web failed: ${e?.message ?? String(e)}`).catch(() => {})
+          } finally {
+            // Hold the marker and latch until health.up: clearing here would
+            // drop crash suppression mid-restart, and re-arming here would let
+            // a still-present marker re-fire into a second restart.
+            this.awaitingHealthyBoot = true
+            this.pendingRestartRequest = restartReq
+            this.restartRequestTimer = null
+          }
+        })()
+      }, 5000)
+      return
+    }
+
     // DEGRADED: http 200 but log has plugin error → report + notify, rollback after consecutive threshold
     if (health.degraded) {
       this.consecutiveDown = 0
@@ -379,6 +433,21 @@ export class Supervisor {
     if (health.up) {
       this.consecutiveDown = 0
       this.consecutiveDegraded = 0
+      // Post-self-restart boot proved healthy: clear the suppression marker,
+      // run the post-restart session-scan hook and re-arm the single-flight
+      // latch. A failed clear keeps the latch set so the same marker is never
+      // re-handled into a second restart.
+      if (this.awaitingHealthyBoot) {
+        this.awaitingHealthyBoot = false
+        const req = this.pendingRestartRequest
+        this.pendingRestartRequest = undefined
+        let cleared = false
+        try { this.getClearPlannedRestart()(); cleared = true } catch {}
+        if (cleared) this.restartRequestHandled = false
+        if (req) {
+          try { this.deps.onRestartRequestHandled?.(req) } catch {}
+        }
+      }
       // Throttle LKG writes to at most once per 5 minutes
       const now = this.deps.getTime ? this.deps.getTime() : Date.now()
       if (now - this.lastLKGWrite > 5 * 60 * 1000) {
@@ -503,6 +572,10 @@ export class Supervisor {
     if (this.timer) {
       clearInterval(this.timer)
       this.timer = null
+    }
+    if (this.restartRequestTimer) {
+      clearTimeout(this.restartRequestTimer)
+      this.restartRequestTimer = null
     }
   }
 }

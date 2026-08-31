@@ -9,9 +9,15 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
+import { makeSkillProvider } from './skill-provider.js'
+import { registerRestartTool } from './restart-tool.js'
+import { makePreExecuteGuard } from './self-kill-guard.js'
 
-export const inject = ['sessions', 'agents', 'connection'] as const
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+export const inject = ['sessions', 'agents', 'connection', 'skills'] as const
 
 export interface SupervisorPluginConfig {
   autoResumeWithin?: number | string // in MINUTES if number, or "5m"/"30s"/"1h" string
@@ -262,6 +268,23 @@ export function createResumeRpcHandler(
   }
 }
 
+/** Resolve the package-root skills/ dir regardless of module layout. The built
+ * host lib is flat (lib/plugin.js → ../skills), but under vitest the same
+ * module loads from src/host/ (→ ../../skills). Walking to the nearest
+ * package.json yields the same package-root skills/ in both layouts. */
+function resolveSkillsDir(fromDir: string): string {
+  let dir = fromDir
+  for (let i = 0; i < 6; i++) {
+    try {
+      if (fs.existsSync(path.join(dir, 'package.json'))) return path.join(dir, 'skills')
+    } catch {}
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return path.join(fromDir, '..', 'skills')
+}
+
 function ensureSystemdKeepalive(ctx: any): void {
   // Best-effort: ensure dsh-web-keepalive.service exists and is enabled, and linger is on.
   // This is the user-level auto-fix for the 11:42:58 crash where manager session 97
@@ -313,6 +336,27 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
   // error-reporting logger call itself throwing).
   try {
     try { ensureSystemdKeepalive(ctx) } catch {}
+    try {
+      const skills: any = ctx.get?.('skills')
+      if (skills?.registerProvider) {
+        ctx.effect(() => {
+          let unregister: (() => void) | undefined
+          try {
+            // Package-root skills/ is resolved at runtime by walking to the
+            // nearest package.json (robust to lib/ vs src/host/ layouts).
+            unregister = skills.registerProvider(() => makeSkillProvider(resolveSkillsDir(__dirname)))
+          } catch (e: any) { ctx.logger?.warn?.(`[supervisor] skill provider failed: ${e?.message ?? String(e)}`) }
+          return () => { try { unregister?.() } catch {} }
+        }, 'supervisor:skill')
+      }
+    } catch {}
+
+    try {
+      ctx.effect(() => registerRestartTool(ctx), 'supervisor:restart-tool')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] restart tool effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
+
     ctx.effect(() => {
       let disposed = false
       let timer: ReturnType<typeof setTimeout> | null = null
@@ -348,6 +392,18 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
         }
       }
     }, 'supervisor:auto-resume')
+
+    try {
+      // Deny bash/shell self-kill commands in-tree; the safe restart path is
+      // dsh_web_restart (supervisor daemon owns the actual restart).
+      const guard = makePreExecuteGuard()
+      ctx.effect(() => {
+        const un = ctx.on?.('tools/pre-execute', guard) ?? null
+        return () => { try { un?.() } catch {} }
+      }, 'supervisor:self-kill-guard')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] self-kill guard effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
   } catch (e: any) {
     try {
       ctx.logger?.warn?.(`[supervisor] auto-resume apply() failed: ${e?.message ?? String(e)}`)

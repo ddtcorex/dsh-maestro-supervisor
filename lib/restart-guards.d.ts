@@ -6,3 +6,14 @@ export declare function plannedRestartPath(): string;
 export declare function writePlannedRestart(ttlMs?: number): void;
 export declare function checkPlannedRestart(markerPath?: string): boolean;
 export declare function clearPlannedRestart(): void;
+export interface RestartRequest {
+    ts: number;
+    ttl: number;
+    callerSessionId?: string;
+    reason?: string;
+}
+export declare function writeRestartRequest(caller: {
+    callerSessionId?: string;
+    reason?: string;
+}, ttlMs?: number): void;
+export declare function readRestartRequest(): RestartRequest | undefined;

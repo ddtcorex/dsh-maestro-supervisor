@@ -265,6 +265,72 @@ describe('apply', () => {
     expect(inject).toContain('agents')
   })
 
+  it('declares skills in inject so the skills service exists when the provider registers', () => {
+    expect(inject).toContain('skills')
+  })
+
+  it('registers a skills provider via ctx.get(skills) that lists the dsh-safe-restart candidate and unregisters on dispose', async () => {
+    const unregisterSpy = vi.fn(() => {})
+    const registerProviderSpy = vi.fn(() => unregisterSpy)
+    const disposers: (() => void)[] = []
+    const ctx = makeCtxWithEffect({
+      effect: (fn: any) => { const d = fn(); disposers.push(d); return d },
+      get: (key: string) => (key === 'skills' ? { registerProvider: registerProviderSpy } : undefined),
+    })
+
+    expect(() => apply(ctx)).not.toThrow()
+
+    // registration went through the real apply() wiring, not a direct call
+    expect(registerProviderSpy).toHaveBeenCalledTimes(1)
+    const providerFactory = registerProviderSpy.mock.calls[0][0] as () => any
+    const provider = providerFactory()
+    const candidates = await provider.list({})
+    expect(candidates.map((c: any) => c.name)).toEqual(['dsh-safe-restart'])
+    expect(candidates[0].provider).toBe('maestro-supervisor')
+    expect(candidates[0].resourceBase?.path).toMatch(/skills[\\/]dsh-safe-restart$/)
+
+    // effect disposers clear the auto-resume timer/RPC and attempt skill deregistration without throwing
+    expect(disposers.length).toBeGreaterThanOrEqual(2)
+    expect(() => disposers.forEach((d) => d())).not.toThrow()
+    expect(unregisterSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('registers the dsh_web_restart tool through apply() when ctx.tools.register is available', () => {
+    const registered: any[] = []
+    const ctx = makeCtxWithEffect({ tools: { register: (d: any) => { registered.push(d); return () => {} } } })
+    expect(() => apply(ctx)).not.toThrow()
+    expect(registered.some(t => t.name === 'dsh_web_restart')).toBe(true)
+  })
+
+  it('does not throw when ctx.tools is missing entirely (restart tool degrades to a logged skip)', () => {
+    const ctx = makeCtxWithEffect() // no tools key
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
+  it('registers a tools/pre-execute self-kill guard via apply when ctx.on exists', () => {
+    const onCalls: any[] = []
+    const ctx = makeCtxWithEffect({ on: (ev: string, h: any) => { onCalls.push([ev, h]); return () => {} } })
+    expect(() => apply(ctx)).not.toThrow()
+    expect(onCalls.some(([ev]) => ev === 'tools/pre-execute')).toBe(true)
+  })
+
+  it('denies a bash self-kill through the pre-execute guard registered by apply', async () => {
+    let handler: any
+    const ctx = makeCtxWithEffect({ on: (ev: string, h: any) => { if (ev === 'tools/pre-execute') handler = h; return () => {} } })
+    apply(ctx)
+    expect(typeof handler).toBe('function')
+    const res = await handler({ name: 'bash', args: { command: 'systemctl --user restart dsh-web' } }, async () => ({ kind: 'allow' }))
+    expect(res).toMatchObject({ kind: 'deny' })
+    expect(res.reason).toContain('dsh_web_restart')
+    const benign = await handler({ name: 'bash', args: { command: 'ls -la' } }, async () => ({ kind: 'allow' }))
+    expect(benign).toEqual({ kind: 'allow' })
+  })
+
+  it('does not throw when ctx.on is missing entirely', () => {
+    const ctx = makeCtxWithEffect() // no on method
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
   it('routes a loopback resume request to the in-process resume handler', async () => {
     const ctx = makeCtx()
     const resume = vi.fn(async () => ['proj/session-a'])
