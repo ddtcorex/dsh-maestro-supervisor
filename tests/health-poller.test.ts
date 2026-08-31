@@ -61,6 +61,24 @@ describe('health-poller', () => {
     expect(r.error).toContain('assertChannel')
   })
 
+  it('ignores structured Maestro Sync status logs after a healthy start', async () => {
+    // Regression (2026-08-31): a healthy dsh web (HTTP 401) was rolled back and
+    // restarted because the broad 'JSON' matcher flagged maestro-sync's status
+    // line — its JSON payload lists session.jsonl.zstd / settings.json paths.
+    const r = await pollHealth({
+      fetch: async () => ({ status: 401, text: async () => 'unauthorized' }) as any,
+      psAlive: async () => true,
+      logTail: async () => [
+        'dsh web: http://127.0.0.1:3080/?token=abc',
+        '[maestro-sync] slim {"localOnly":91,"remoteOnly":51,"both":788,"localOnlyFiles":["sessions/--project-key--/009003fe-03d4-4f16-9915-6984e0aa7a4f/session.jsonl.zstd"],"remoteOnlyFiles":["memories/daily/2026-08-24.md.bak.1787658738478"],"bothFiles":[".anonymous-user-id","maestro/settings.json","memories/SUGGESTIONS.jsonl","memories/TODOS-work.md"],"connection":{"ok":true,"host":"example.com","latencyMs":2364},"remoteHost":"example.com"}',
+      ].join('\n'),
+    })
+    expect(r.up).toBe(true)
+    expect(r.httpCode).toBe(401)
+    expect(r.error).toBeUndefined()
+    expect(r.degraded).toBeUndefined()
+  })
+
   afterEach(() => {
     clearPlannedRestart()
   })
