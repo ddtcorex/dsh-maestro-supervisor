@@ -87,3 +87,30 @@ export function clearPlannedRestart(): void {
     }
   } catch {}
 }
+
+// Restart-request variant of planned-restart.json: carries the caller's
+// identity and intent so the dsh_web_restart tool (Task 3) and the daemon
+// (Task 4) can attribute a restart to the session that requested it. Reuses
+// the same marker path — writePlannedRestart/checkPlannedRestart keep working
+// on {ts, ttl} only, while this adds callerSessionId + reason for later tasks.
+export interface RestartRequest { ts: number; ttl: number; callerSessionId?: string; reason?: string }
+
+export function writeRestartRequest(caller: { callerSessionId?: string; reason?: string }, ttlMs = 180_000): void {
+  const p = plannedRestartPath()
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  const body: RestartRequest = { ts: Date.now(), ttl: ttlMs, ...caller }
+  fs.writeFileSync(p, JSON.stringify(body), { mode: 0o600 })
+  try { fs.chmodSync(p, 0o600) } catch {}
+}
+
+export function readRestartRequest(): RestartRequest | undefined {
+  try {
+    const raw = fs.readFileSync(plannedRestartPath(), 'utf8')
+    const j = JSON.parse(raw) as Partial<RestartRequest>
+    if (typeof j.ts === 'number' && typeof j.ttl === 'number') {
+      if (Date.now() - j.ts >= j.ttl) return undefined
+      return { ts: j.ts, ttl: j.ttl, callerSessionId: j.callerSessionId, reason: j.reason }
+    }
+  } catch {}
+  return undefined
+}

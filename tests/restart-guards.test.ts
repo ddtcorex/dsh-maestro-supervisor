@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { buildKillStalePortsCommand } from '../src/host/restart-guards.js'
+import {
+  buildKillStalePortsCommand,
+  clearPlannedRestart,
+  readRestartRequest,
+  writeRestartRequest,
+} from '../src/host/restart-guards.js'
 
 describe('buildKillStalePortsCommand', () => {
   it('only kills :3080, never :3000', () => {
@@ -80,6 +85,25 @@ describe('planned restart marker 30s', () => {
     const j = JSON.parse(fs.readFileSync(p, 'utf8'))
     expect(j.ttl).toBe(30000)
     expect(typeof j.ts).toBe('number')
+    clearPlannedRestart()
+  })
+})
+
+describe('restart-request marker', () => {
+  it('persists caller metadata and reads it back; TTL expiry returns undefined', () => {
+    clearPlannedRestart()
+    expect(readRestartRequest()).toBeUndefined()
+    writeRestartRequest({ callerSessionId: 'proj/s-1', reason: 'applied plugin v2' }, 180_000)
+    const req = readRestartRequest()
+    expect(req?.callerSessionId).toBe('proj/s-1')
+    expect(req?.reason).toBe('applied plugin v2')
+    expect(req?.ttl).toBe(180_000)
+    clearPlannedRestart()
+  })
+
+  it('treats an expired marker as absent', () => {
+    writeRestartRequest({ callerSessionId: 'x' }, -1) // ttl already elapsed
+    expect(readRestartRequest()).toBeUndefined()
     clearPlannedRestart()
   })
 })
