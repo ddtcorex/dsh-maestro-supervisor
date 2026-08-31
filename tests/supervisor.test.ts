@@ -293,3 +293,51 @@ describe('supervisor', () => {
     expect(rollback2).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('caller restart-request handling', () => {
+  it('fires restartWeb exactly once after the grace when a caller marker is present', async () => {
+    vi.useFakeTimers()
+    const restartWeb = vi.fn(async () => {})
+    const notify = vi.fn(async () => {})
+    const req = { ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-1', reason: 'plugin v2' }
+    const supervisor = new Supervisor({
+      pollHealth: async () => ({ up: false }),
+      writeLKG: async () => ({ ts: '', manifest: { files: [] } } as any),
+      writeFailed: async () => ({ ts: '' } as any),
+      writeReport: async (o: any) => o.ts,
+      rollback: async () => {},
+      restartWeb,
+      notify,
+      getTime: () => Date.now(),
+      isPlannedRestartActive: async () => false,
+      readRestartRequest: () => req,
+    } as any)
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/self-restart by session proj\/s-1/))
+    supervisor.stop()
+    vi.useRealTimers()
+  })
+
+  it('does nothing when the marker has no caller', async () => {
+    vi.useFakeTimers()
+    const restartWeb = vi.fn(async () => {})
+    const supervisor = new Supervisor({
+      pollHealth: async () => ({ up: false }),
+      writeLKG: async () => ({ ts: '' } as any),
+      writeFailed: async () => ({ ts: '' } as any),
+      writeReport: async (o: any) => o.ts,
+      rollback: async () => {},
+      restartWeb,
+      notify: async () => {},
+      getTime: () => Date.now(),
+      readRestartRequest: () => undefined,
+    } as any)
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).not.toHaveBeenCalled()
+    supervisor.stop()
+    vi.useRealTimers()
+  })
+})

@@ -6,7 +6,8 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot } from './paths.js'
 import { readSupervisorConfig } from './config.js'
-import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart } from './restart-guards.js'
+import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart, clearPlannedRestart } from './restart-guards.js'
+import type { RestartRequest } from './restart-guards.js'
 import { buildKillStalePortsCommand } from './restart-guards.js'
 
 export interface SupervisorDeps {
@@ -41,6 +42,11 @@ export interface SupervisorDeps {
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
   findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
   resumeSessions?: (ids: string[]) => Promise<{ resumed: string[] }>
+  // dsh_web_restart hand-off (restart-tool.ts): the daemon is the restart
+  // owner. Reads the caller marker and, after a ~5s grace, restarts dsh web
+  // once (single-flight per marker), notifies, then clears the marker.
+  readRestartRequest?: () => RestartRequest | undefined
+  onRestartRequestHandled?: (req: RestartRequest) => void
 }
 
 export async function resumeViaRpc(
@@ -74,6 +80,8 @@ export class Supervisor {
   private consecutiveDown = 0
   private consecutiveDegraded = 0
   private timer: ReturnType<typeof setInterval> | null = null
+  private restartRequestHandled = false
+  private restartRequestTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(deps: SupervisorDeps) {
     this.deps = deps
@@ -302,6 +310,34 @@ export class Supervisor {
   async tick(): Promise<void> {
     const health = await this.deps.pollHealth()
 
+    // dsh_web_restart hand-off: the tool wrote a caller marker and handed the
+    // restart to the daemon (out-of-band). Honor one request per marker — one
+    // grace timer → restartWeb once → notify → clear the marker. Return early
+    // so the in-flight down of our own restart is never mistaken for a crash
+    // and raced with a second rollback/restart by the crash path below.
+    const restartReq = this.deps.readRestartRequest ? this.deps.readRestartRequest() : undefined
+    if (restartReq?.callerSessionId && !this.restartRequestHandled) {
+      this.restartRequestHandled = true
+      this.restartRequestTimer = setTimeout(() => {
+        void (async () => {
+          try {
+            await this.restartWeb()
+            await this.deps.notify(`restarted dsh-web after self-restart by session ${restartReq.callerSessionId}`)
+            this.deps.onRestartRequestHandled?.(restartReq)
+          } catch (e: any) {
+            await this.deps.notify(`self-restart dsh-web failed: ${e?.message ?? String(e)}`).catch(() => {})
+          } finally {
+            try { clearPlannedRestart() } catch {}
+            // Single-flight is per marker, not per daemon lifetime: the marker
+            // is gone, so re-arming lets a future dsh_web_restart request act.
+            this.restartRequestHandled = false
+            this.restartRequestTimer = null
+          }
+        })()
+      }, 5000)
+      return
+    }
+
     // DEGRADED: http 200 but log has plugin error → report + notify, rollback after consecutive threshold
     if (health.degraded) {
       this.consecutiveDown = 0
@@ -503,6 +539,10 @@ export class Supervisor {
     if (this.timer) {
       clearInterval(this.timer)
       this.timer = null
+    }
+    if (this.restartRequestTimer) {
+      clearTimeout(this.restartRequestTimer)
+      this.restartRequestTimer = null
     }
   }
 }

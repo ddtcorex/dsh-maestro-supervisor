@@ -5,7 +5,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot, resolveDeepseekHarnessDir } from './paths.js'
-import { buildKillStalePortsCommand, isSelfCopyError, checkPlannedRestart, writePlannedRestart } from './restart-guards.js'
+import { buildKillStalePortsCommand, isSelfCopyError, checkPlannedRestart, writePlannedRestart, readRestartRequest, clearPlannedRestart } from './restart-guards.js'
 
 export async function runCli(args: string[]): Promise<void> {
   const cmd = args[2] ?? '--help'
@@ -182,6 +182,11 @@ Commands:
       },
       notify: async (msg) => console.log(`[notify] ${msg}`),
       isPlannedRestartActive: () => checkPlannedRestart(),
+      // dsh_web_restart marker ownership: the daemon acts on the marker. The
+      // post-restart session scan (post-self-restart hygiene) lands with
+      // scan.ts in the follow-up batch task; here the marker is simply cleared.
+      readRestartRequest: () => readRestartRequest(),
+      onRestartRequestHandled: async () => { void clearPlannedRestart() },
     })
     await supervisor.start()
     // keep process alive
