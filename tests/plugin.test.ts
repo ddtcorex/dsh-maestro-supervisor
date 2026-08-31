@@ -38,6 +38,19 @@ describe('resumeInterrupted', () => {
     expect(ctx._logs.filter((l: string) => l.includes('warn:')).length).toBeGreaterThanOrEqual(2)
   })
 
+  it('resumes a self-restart caller with a contextual message and consumes the intent', async () => {
+    const followup = vi.fn()
+    const ctx = makeCtx({ agents: { get: () => ({ followup }) } })
+    const consume = vi.fn()
+    const read = (id: string) => (id === 'abc' ? { ts: 1, sessionId: 'abc', reason: 'e2e-test' } : undefined)
+    const resumed = await resumeInterrupted(ctx, ['proj/abc'], { readIntent: read, consumeIntent: consume })
+    expect(resumed).toEqual(['proj/abc'])
+    const text = followup.mock.calls[0][0].content[0].text as string
+    expect(text).toContain('requested a dsh web restart')
+    expect(text).toContain('e2e-test')
+    expect(consume).toHaveBeenCalledWith('abc')
+  })
+
   it('sends a "continue" follow-up turn after successfully re-attaching an agent', async () => {
     const followup = vi.fn()
     const persistence = {
