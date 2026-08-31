@@ -269,6 +269,28 @@ describe('apply', () => {
     expect(inject).toContain('skills')
   })
 
+  it('declares tools in inject so ctx.tools resolves for the dsh_web_restart registration', () => {
+    // Without 'tools' injected, ctx.tools is undefined and registerRestartTool's
+    // ctx.tools.register throws inside the wrapped effect — the tool silently
+    // never registers and agents cannot find it at runtime.
+    expect(inject).toContain('tools')
+  })
+
+  it('registers dsh_web_restart through apply() wiring via ctx.tools', async () => {
+    const registered: any[] = []
+    const disposers: (() => void)[] = []
+    // Cordis inject exposes the 'tools' service as the plugin ctx's `tools`
+    // property — simulate that exactly (ctx.get('tools') is NOT the path used).
+    const ctx = makeCtxWithEffect({
+      effect: (fn: any) => { const d = fn(); disposers.push(d); return d },
+      tools: { register: (def: any) => { registered.push(def); return () => {} } },
+      get: () => undefined,
+    })
+    expect(() => apply(ctx)).not.toThrow()
+    expect(registered.some(t => t.name === 'dsh_web_restart')).toBe(true)
+    for (const d of disposers) { expect(() => d()).not.toThrow() }
+  })
+
   it('registers a skills provider via ctx.get(skills) that lists the dsh-safe-restart candidate and unregisters on dispose', async () => {
     const unregisterSpy = vi.fn(() => {})
     const registerProviderSpy = vi.fn(() => unregisterSpy)

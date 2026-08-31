@@ -17,7 +17,7 @@ import { makePreExecuteGuard } from './self-kill-guard.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-export const inject = ['sessions', 'agents', 'connection', 'skills'] as const
+export const inject = ['sessions', 'agents', 'connection', 'tools', 'skills'] as const
 
 export interface SupervisorPluginConfig {
   autoResumeWithin?: number | string // in MINUTES if number, or "5m"/"30s"/"1h" string
