@@ -2,6 +2,10 @@
 Description=DSH Web — main harness web UI + webhook (:3080/:3000)
 After=network.target
 Wants=network.target
+# Cap boot crash loops: if the unit fails to start more than 3 times within 60s,
+# systemd stops retrying until the interval elapses (avoids a tight restart storm).
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
