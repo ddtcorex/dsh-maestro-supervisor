@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-09-01
+
+### Fixed
+
+- Declare `tools` in the host plugin's inject so `ctx.tools` resolves and `dsh_web_restart` actually registers at runtime (previously the registration threw silently inside the wrapped effect and agents could not find the tool).
+- Auto-resume reads the durable restart-intent sidecar written by `dsh_web_restart` and resumes a self-restart caller with a contextual message ("you requested a dsh web restart … do NOT call dsh_web_restart again") instead of the generic TOOL_OUTCOME_UNKNOWN recovery prompt, then consumes the sidecar.
+- Self-kill guard scopes `kill` denials to the dsh web process tree only (any-listener pid over-denial removed).
+- `isPluginTreeChanged` also detects `cordis.patch.yml`-only edits.
+- `restart-guards` tests are hermetic (homedir-mocked) — no longer contend with the live supervisor daemon's marker under parallel vitest.
+- `dryBootVerify` reports EADDRINUSE collisions explicitly.
+
 ## [0.7.0] - 2026-09-01
 
 ### Added
