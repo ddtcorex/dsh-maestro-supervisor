@@ -345,13 +345,14 @@ describe('caller restart-request handling', () => {
     vi.useRealTimers()
   })
 
-  it('re-arms the single-flight latch once the marker is cleared, handling a later request', async () => {
+  it('clears the suppression marker on the post-restart up-tick (held until boot proves healthy)', async () => {
     vi.useFakeTimers()
     const restartWeb = vi.fn(async () => {})
+    const cleared = vi.fn()
+    let up = false
     let marker: any = { ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-1', reason: 'plugin v2' }
-    let cleared = 0
     const supervisor = new Supervisor({
-      pollHealth: async () => ({ up: false }),
+      pollHealth: async () => ({ up }),
       writeLKG: async () => ({ ts: '' } as any),
       writeFailed: async () => ({ ts: '' } as any),
       writeReport: async (o: any) => o.ts,
@@ -361,13 +362,22 @@ describe('caller restart-request handling', () => {
       getTime: () => Date.now(),
       writePlannedRestart: () => {},
       readRestartRequest: () => marker,
-      clearPlannedRestart: () => { marker = undefined; cleared++ },
+      clearPlannedRestart: cleared,
     } as any)
     await supervisor.tick()
     await vi.advanceTimersByTimeAsync(6000)
     expect(restartWeb).toHaveBeenCalledTimes(1)
-    expect(cleared).toBe(1)
-    // Marker cleared → a fresh request is handled again.
+    // The suppression marker must NOT be cleared before the restart boot
+    // proves healthy — clearing early would drop crash suppression mid-boot.
+    expect(cleared).not.toHaveBeenCalled()
+    // Boot completes: the up-tick clears the pending marker/flag exactly once
+    // and does not re-fire restartWeb.
+    up = true
+    marker = undefined
+    await supervisor.tick()
+    expect(cleared).toHaveBeenCalledTimes(1)
+    expect(restartWeb).toHaveBeenCalledTimes(1)
+    // Marker cleared + latch re-armed → a fresh request is handled again.
     marker = { ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-2', reason: 'again' }
     await supervisor.tick()
     await vi.advanceTimersByTimeAsync(6000)
@@ -376,11 +386,12 @@ describe('caller restart-request handling', () => {
     vi.useRealTimers()
   })
 
-  it('does not re-arm the single-flight latch when the marker clear fails', async () => {
+  it('keeps the single-flight latch when the up-tick marker clear fails', async () => {
     vi.useFakeTimers()
     const restartWeb = vi.fn(async () => {})
+    let up = false
     const supervisor = new Supervisor({
-      pollHealth: async () => ({ up: false }),
+      pollHealth: async () => ({ up }),
       writeLKG: async () => ({ ts: '' } as any),
       writeFailed: async () => ({ ts: '' } as any),
       writeReport: async (o: any) => o.ts,
@@ -395,10 +406,45 @@ describe('caller restart-request handling', () => {
     await supervisor.tick()
     await vi.advanceTimersByTimeAsync(6000)
     expect(restartWeb).toHaveBeenCalledTimes(1)
-    // Clear failed → the marker is still present and the latch must NOT re-arm:
-    // a further tick must not fire a second restart for the same marker.
+    // Boot completes but the clear throws → the latch must stay set so the
+    // still-present marker is never re-handled into a second restart.
+    up = true
+    await supervisor.tick()
+    up = false
     await supervisor.tick()
     await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).toHaveBeenCalledTimes(1)
+    supervisor.stop()
+    vi.useRealTimers()
+  })
+
+  it('does not rollback or re-fire restartWeb on a down tick within the restart debounce', async () => {
+    vi.useFakeTimers()
+    const restartWeb = vi.fn(async () => {})
+    const rollback = vi.fn(async () => {})
+    let up = false
+    const supervisor = new Supervisor({
+      pollHealth: async () => ({ up }),
+      writeLKG: async () => ({ ts: '' } as any),
+      writeFailed: async () => ({ ts: '' } as any),
+      writeReport: async (o: any) => o.ts,
+      rollback,
+      restartWeb,
+      notify: async () => {},
+      getTime: () => Date.now(),
+      writePlannedRestart: () => {},
+      readRestartRequest: () => ({ ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-1' }),
+      downThreshold: 1, // normally a single down tick would rollback + restart
+    } as any)
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).toHaveBeenCalledTimes(1)
+    expect(rollback).not.toHaveBeenCalled()
+    // Still booting (down). The debounce set when the grace branch issued the
+    // restart must hold: no rollback and no racing second restart.
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(rollback).not.toHaveBeenCalled()
     expect(restartWeb).toHaveBeenCalledTimes(1)
     supervisor.stop()
     vi.useRealTimers()

@@ -122,7 +122,11 @@ function newestFileMtime(dir: string): number {
 }
 
 function currentSessionId(exec: any, fallback?: (exec: any) => string | undefined): string | undefined {
-  return exec?.sessionId ?? exec?.session?.id ?? exec?.caller?.sessionId ?? fallback?.(exec)
+  // dsh-tools dispatch hands a ToolRunContext — the exec itself has no
+  // sessionId/session/caller fields; session identity lives on the agent
+  // (exec.agent.id is the branded SessionId, exec.agent.session.id also
+  // exists). Probe those first so production dispatches are identifiable.
+  return exec?.agent?.id ?? exec?.agent?.session?.id ?? exec?.sessionId ?? exec?.session?.id ?? exec?.caller?.sessionId ?? fallback?.(exec)
 }
 
 /**

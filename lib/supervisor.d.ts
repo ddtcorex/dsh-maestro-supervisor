@@ -59,6 +59,8 @@ export declare class Supervisor {
     private timer;
     private restartRequestHandled;
     private restartRequestTimer;
+    private awaitingHealthyBoot;
+    private pendingRestartRequest;
     constructor(deps: SupervisorDeps);
     private getWritePlannedRestart;
     private getCheckPlannedRestart;

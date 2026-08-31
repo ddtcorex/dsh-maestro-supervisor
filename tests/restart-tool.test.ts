@@ -121,13 +121,52 @@ describe('registerRestartTool', () => {
     const deps = {
       dryBoot: async () => ({ ok: true, detail: '200' }),
       writeRestartRequest: vi.fn(),
-    } // no sessionIdOf → currentSessionId({}) is undefined
+    } // no sessionIdOf and no agent on the exec → truly caller-less
     registerRestartTool(ctx, deps as any)
     const t = registered.find(x => x.name === 'dsh_web_restart')
-    const result = await t.execute({ pluginChanged: false }, {})
+    const result = await t.execute({ pluginChanged: false }, { name: 'bash', arguments: {} })
     expect(result.ok).toBe(false)
     expect(result.detail).toMatch(/cannot identify the calling session/)
     expect(deps.writeRestartRequest).not.toHaveBeenCalled()
+  })
+
+  it('identifies the calling session from the ToolRunContext agent.id without sessionIdOf', async () => {
+    const registered: any[] = []
+    const ctx: any = {
+      tools: { register: (def: any) => { registered.push(def); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    }
+    const deps = {
+      dryBoot: async () => ({ ok: true, detail: '200' }),
+      writeRestartRequest: vi.fn(),
+    } // no injected sessionIdOf — the real dsh-tools dispatch shape carries the id on exec.agent
+    registerRestartTool(ctx, deps as any)
+    const t = registered.find(x => x.name === 'dsh_web_restart')
+    // Realistic ToolRunContext: { callId, rootCallId, name, arguments, agent: Agent, ... }
+    const exec = { name: 'bash', arguments: {}, agent: { id: 'proj/s-1' } }
+    const result = await t.execute({ pluginChanged: false, reason: 'plugin v2' }, exec)
+    expect(result.ok).toBe(true)
+    expect(deps.writeRestartRequest).toHaveBeenCalledWith(
+      { callerSessionId: 'proj/s-1', reason: 'plugin v2' }, expect.any(Number))
+    expect(result.detail).toMatch(/caller proj\/s-1/)
+  })
+
+  it('falls back to the agent session id when agent.id is absent', async () => {
+    const registered: any[] = []
+    const ctx: any = {
+      tools: { register: (def: any) => { registered.push(def); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    }
+    const deps = { dryBoot: async () => ({ ok: true, detail: '200' }), writeRestartRequest: vi.fn() }
+    registerRestartTool(ctx, deps as any)
+    const t = registered.find(x => x.name === 'dsh_web_restart')
+    const exec = { name: 'bash', arguments: {}, agent: { session: { id: 'proj/s-9' } } }
+    const result = await t.execute({ pluginChanged: false }, exec)
+    expect(result.ok).toBe(true)
+    expect(deps.writeRestartRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ callerSessionId: 'proj/s-9' }), expect.any(Number))
   })
 
   it('writes the intent sidecar with a flattened filename for slash-namespaced ids', async () => {
