@@ -18,6 +18,11 @@ function parseFrontmatter(raw: string): { name: string; description: string; bod
 
 export function makeSkillProvider(skillsDir: string) {
   return {
+    // The dsh-skill service attributes candidates through the provider
+    // object's own `name` (maestro-skills returns `{ name, list, get }`); a
+    // missing name surfaces at runtime as `skill provider "undefined" returned
+    // skill ... for provider "maestro-supervisor"` and fails every turn.
+    name: 'maestro-supervisor',
     async list(_options: SkillLookupOptions): Promise<SkillCandidate[]> {
       const entry = join(skillsDir, SKILL_NAME)
       const st = await stat(entry).catch(() => null)

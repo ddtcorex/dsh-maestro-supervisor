@@ -7,6 +7,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const skillsDir = resolve(__dirname, '../skills')
 
 describe('dsh-safe-restart skill provider', () => {
+  it('exposes its own provider name (dsh-skill attributes via provider.name)', async () => {
+    const provider = makeSkillProvider(skillsDir)
+    expect((provider as any).name).toBe('maestro-supervisor')
+  })
+
   it('lists exactly the dsh-safe-restart skill from the package skills dir', async () => {
     const as = (await makeSkillProvider(skillsDir).list({} as any)) as Array<{ name: string; path: string }>
     expect(as.map(s => s.name)).toEqual(['dsh-safe-restart'])
