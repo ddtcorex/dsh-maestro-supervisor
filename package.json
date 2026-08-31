@@ -33,6 +33,7 @@
   },
   "files": [
     "lib",
+    "skills",
     "README.md",
     "cordis.patch.yml"
   ],

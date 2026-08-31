@@ -7,9 +7,14 @@
  */
 
 import * as fs from 'node:fs'
+import { dirname } from 'node:path'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
+import { makeSkillProvider } from './skill-provider.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export const inject = ['sessions', 'agents', 'connection'] as const
 
@@ -313,6 +318,20 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
   // error-reporting logger call itself throwing).
   try {
     try { ensureSystemdKeepalive(ctx) } catch {}
+    try {
+      const skills: any = ctx.get?.('skills')
+      if (skills?.registerProvider) {
+        ctx.effect(() => {
+          let unregister: (() => void) | undefined
+          try {
+            // Built host lib is flat (lib/plugin.js); package-root skills/ is one
+            // directory above lib/. Never a hardcoded path — resolved at runtime.
+            unregister = skills.registerProvider(() => makeSkillProvider(path.resolve(__dirname, '../skills')))
+          } catch (e: any) { ctx.logger?.warn?.(`[supervisor] skill provider failed: ${e?.message ?? String(e)}`) }
+          return () => { try { unregister?.() } catch {} }
+        }, 'supervisor:skill')
+      }
+    } catch {}
     ctx.effect(() => {
       let disposed = false
       let timer: ReturnType<typeof setTimeout> | null = null
