@@ -295,6 +295,18 @@ describe('apply', () => {
     expect(unregisterSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('registers the dsh_web_restart tool through apply() when ctx.tools.register is available', () => {
+    const registered: any[] = []
+    const ctx = makeCtxWithEffect({ tools: { register: (d: any) => { registered.push(d); return () => {} } } })
+    expect(() => apply(ctx)).not.toThrow()
+    expect(registered.some(t => t.name === 'dsh_web_restart')).toBe(true)
+  })
+
+  it('does not throw when ctx.tools is missing entirely (restart tool degrades to a logged skip)', () => {
+    const ctx = makeCtxWithEffect() // no tools key
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
   it('routes a loopback resume request to the in-process resume handler', async () => {
     const ctx = makeCtx()
     const resume = vi.fn(async () => ['proj/session-a'])

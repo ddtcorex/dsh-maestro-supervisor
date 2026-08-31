@@ -12,6 +12,7 @@ import * as os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
 import { makeSkillProvider } from './skill-provider.js'
+import { registerRestartTool } from './restart-tool.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -348,6 +349,13 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
         }, 'supervisor:skill')
       }
     } catch {}
+
+    try {
+      ctx.effect(() => registerRestartTool(ctx), 'supervisor:restart-tool')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] restart tool effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
+
     ctx.effect(() => {
       let disposed = false
       let timer: ReturnType<typeof setTimeout> | null = null
