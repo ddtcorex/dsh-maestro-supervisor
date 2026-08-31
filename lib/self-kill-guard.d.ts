@@ -7,9 +7,12 @@
 /**
  * Whether a shell command is a self-kill. `livePids` are the pids currently
  * holding listening sockets; a `kill <pid>` whose pid is one of ours is a
- * self-kill regardless of anything else in the command. A bare `kill <pid>`
- * against an unrelated pid is allowed (idempotent cleanups are common), as
- * are kill attempts whose output reports "not found"/"done".
+ * self-kill regardless of anything else in the command. The kill parser accepts
+ * flag forms (`kill -9 <pid>`, `kill -TERM <pid>`). A command that is
+ * essentially JUST a `kill <unrelated-pid>` is allowed (idempotent cleanups
+ * are common), as are kill attempts whose output reports "not found"/"done" —
+ * but any compound that chains a restart/kill after it (or before the end)
+ * stays denied.
  */
 export declare function isSelfKillCommand(cmd: string, livePids: number[]): boolean;
 /**

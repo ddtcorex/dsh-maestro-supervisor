@@ -27,6 +27,7 @@ export interface SupervisorDeps {
     isPlannedRestartActive?: () => boolean | Promise<boolean>;
     writePlannedRestart?: (ttlMs?: number) => void;
     checkPlannedRestart?: () => boolean;
+    clearPlannedRestart?: () => void;
     runDebugAgent?: (opts: {
         reportPath: string;
         health: HealthState;
@@ -61,6 +62,7 @@ export declare class Supervisor {
     constructor(deps: SupervisorDeps);
     private getWritePlannedRestart;
     private getCheckPlannedRestart;
+    private getClearPlannedRestart;
     restartWeb(): Promise<void>;
     private getRunDebugAgent;
     private getFindInterrupted;

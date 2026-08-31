@@ -38,6 +38,9 @@ export interface SupervisorDeps {
   // touching the filesystem.
   writePlannedRestart?: (ttlMs?: number) => void
   checkPlannedRestart?: () => boolean
+  // Clears the restart-request/planned-restart marker; injectable for tests so
+  // the re-arm decision after a self-restart can be verified without fs.
+  clearPlannedRestart?: () => void
   // injectable for test / LLM wiring
   runDebugAgent?: (opts: { reportPath: string; health: HealthState }) => Promise<{ fixed: boolean; reason: string }>
   findInterrupted?: () => Promise<{ scanned: number; interrupted: string[] }>
@@ -93,6 +96,10 @@ export class Supervisor {
 
   private getCheckPlannedRestart(): () => boolean {
     return this.deps.checkPlannedRestart ?? defaultCheckPlannedRestart
+  }
+
+  private getClearPlannedRestart(): () => void {
+    return this.deps.clearPlannedRestart ?? clearPlannedRestart
   }
 
   async restartWeb(): Promise<void> {
@@ -327,11 +334,14 @@ export class Supervisor {
           } catch (e: any) {
             await this.deps.notify(`self-restart dsh-web failed: ${e?.message ?? String(e)}`).catch(() => {})
           } finally {
-            try { clearPlannedRestart() } catch {}
-            // Single-flight is per marker, not per daemon lifetime: the marker
-            // is gone, so re-arming lets a future dsh_web_restart request act.
-            this.restartRequestHandled = false
+            // Re-arm the single-flight latch only after the marker actually
+            // cleared: with the marker gone a future request can be handled;
+            // if the clear failed, the same marker is still present and must
+            // not be re-handled into a second restart on the next tick.
+            let cleared = false
+            try { this.getClearPlannedRestart()(); cleared = true } catch {}
             this.restartRequestTimer = null
+            if (cleared) this.restartRequestHandled = false
           }
         })()
       }, 5000)

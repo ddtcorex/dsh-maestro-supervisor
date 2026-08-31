@@ -31,9 +31,19 @@ export declare function dryBootVerify(harnessRoot: string, opts?: {
     detail: string;
 }>;
 /**
- * Whether the live profile's web package.json differs from the latest LKG
- * snapshot's copy. No LKG baseline, a missing file on either side, or any
- * read error means "changed" — the caller falls back to the dry-boot gate.
+ * Whether the live plugin tree differs from the latest LKG snapshot. Two
+ * signals are combined:
+ *
+ *   1. manifest drift — the live profile's web `package.json` text vs baseline;
+ *   2. plugin-lib drift — any `@ddtcorex` plugin `lib/` file newer than the
+ *      snapshot moment. Link-installed plugins resolve to the same workspace
+ *      files in both live and LKG, so the stored copies cannot be compared
+ *      byte-wise; the snapshot dir's own mtime is the meaningful baseline and a
+ *      rebuilt `lib/` bumps a file past it even when the manifest text is
+ *      unchanged.
+ *
+ * No LKG baseline, a missing file on either side, or any read error means
+ * "changed" — the caller falls back to the dry-boot gate.
  */
 export declare function isPluginTreeChanged(harnessRoot: string, lkgDir?: string): boolean;
 /**

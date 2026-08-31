@@ -14,7 +14,7 @@
  */
 
 import { join } from 'node:path'
-import { mkdtempSync, rmSync, cpSync, existsSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, cpSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -38,11 +38,12 @@ export async function dryBootVerify(harnessRoot: string, opts: { timeoutMs?: num
   if (!existsSync(liveProfile)) return { ok: true, detail: 'skipped (no live web profile)' }
   const tmpHome = mkdtempSync(join(tmpdir(), 'dsh-dryboot-'))
   const logs: string[] = []
+  let child: ReturnType<typeof spawn> | null = null
   try {
     cpSync(liveProfile, join(tmpHome, 'profiles', 'web'), { recursive: true, preserveTimestamps: true })
     const port = String(9000 + Math.floor(Math.random() * 1000))
     const url = `http://127.0.0.1:${port}/`
-    const child = spawn('node', ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', 'web', '--no-open', '--port', port], {
+    child = spawn('node', ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', 'web', '--no-open', '--port', port], {
       cwd: harnessRoot, env: { ...process.env, DSH_HOME: tmpHome }, stdio: ['ignore', 'pipe', 'pipe'],
     })
     child.stdout?.on('data', (d: Buffer) => logs.push(d.toString()))
@@ -54,21 +55,35 @@ export async function dryBootVerify(harnessRoot: string, opts: { timeoutMs?: num
       try { const r = await fetch(url); if (r.status === 200 || r.status === 401) { code = 0; break } } catch {}
       await new Promise(r => setTimeout(r, 500))
     }
-    if (code !== 0) child.kill('SIGKILL')
     const tail = logs.join('').slice(-3000)
     const loadErr = /ERR_MODULE_NOT_FOUND|assertChannel|must declare output|failed to apply loader entry/.exec(tail)
     return { ok: code === 0 && !loadErr, detail: loadErr ? loadErr[0] : (code === 0 ? 'dry-boot ok' : `dry-boot failed (exit ${code})`) }
   } catch (e: any) {
     return { ok: false, detail: `dry-boot error: ${e?.message ?? String(e)}` }
   } finally {
+    // Kill on every exit path — a successful boot included. The dry boot only
+    // exists to verify the tree; leaving the child up would orphan a dsh web
+    // on the ephemeral port whose temp DSH_HOME is removed below, and a stale
+    // orphan could later answer a port collision with a false-positive 200.
+    try { child?.kill('SIGKILL') } catch {}
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch {}
   }
 }
 
 /**
- * Whether the live profile's web package.json differs from the latest LKG
- * snapshot's copy. No LKG baseline, a missing file on either side, or any
- * read error means "changed" — the caller falls back to the dry-boot gate.
+ * Whether the live plugin tree differs from the latest LKG snapshot. Two
+ * signals are combined:
+ *
+ *   1. manifest drift — the live profile's web `package.json` text vs baseline;
+ *   2. plugin-lib drift — any `@ddtcorex` plugin `lib/` file newer than the
+ *      snapshot moment. Link-installed plugins resolve to the same workspace
+ *      files in both live and LKG, so the stored copies cannot be compared
+ *      byte-wise; the snapshot dir's own mtime is the meaningful baseline and a
+ *      rebuilt `lib/` bumps a file past it even when the manifest text is
+ *      unchanged.
+ *
+ * No LKG baseline, a missing file on either side, or any read error means
+ * "changed" — the caller falls back to the dry-boot gate.
  */
 export function isPluginTreeChanged(harnessRoot: string, lkgDir = join(homedir(), '.dsh/.supervisor/lkg')): boolean {
   void harnessRoot
@@ -76,13 +91,34 @@ export function isPluginTreeChanged(harnessRoot: string, lkgDir = join(homedir()
     const entries = existsSync(lkgDir) ? readdirSync(lkgDir).sort() : []
     const latest = entries[entries.length - 1]
     if (!latest) return true // no baseline → assume changed
-    const lkgManifestPath = join(lkgDir, latest, 'profiles', 'web', 'package.json')
-    const live = join(homedir(), '.dsh', 'profiles', 'web', 'package.json')
-    if (!existsSync(lkgManifestPath) || !existsSync(live)) return true
-    const liveText = readFileSync(live, 'utf8')
-    const lkgText = readFileSync(lkgManifestPath, 'utf8')
-    return liveText !== lkgText
+    const lkgHome = join(lkgDir, latest, 'profiles', 'web')
+    const live = join(homedir(), '.dsh', 'profiles', 'web')
+    const lkgManifest = join(lkgHome, 'package.json')
+    const liveManifest = join(live, 'package.json')
+    if (!existsSync(lkgManifest) || !existsSync(liveManifest)) return true
+    if (readFileSync(liveManifest, 'utf8') !== readFileSync(lkgManifest, 'utf8')) return true
+    const baseline = statSync(join(lkgDir, latest)).mtimeMs
+    const livePlugins = join(live, 'node_modules', '@ddtcorex')
+    if (existsSync(livePlugins)) {
+      for (const name of readdirSync(livePlugins)) {
+        const libDir = join(livePlugins, name, 'lib')
+        if (!existsSync(libDir)) continue
+        if (newestFileMtime(libDir) > baseline) return true
+      }
+    }
+    return false
   } catch { return true }
+}
+
+function newestFileMtime(dir: string): number {
+  let newest = 0
+  for (const entry of readdirSync(dir)) {
+    const p = join(dir, entry)
+    const st = statSync(p)
+    if (st.isDirectory()) newest = Math.max(newest, newestFileMtime(p))
+    else newest = Math.max(newest, st.mtimeMs)
+  }
+  return newest
 }
 
 function currentSessionId(exec: any, fallback?: (exec: any) => string | undefined): string | undefined {
@@ -129,9 +165,14 @@ export function registerRestartTool(ctx: any, deps: {
           if (!gate.ok) return { ok: false, detail: `dry-boot failed — restart refused. ${gate.detail}` }
         }
         const callerSessionId = doSessionId(exec)
+        if (!callerSessionId) {
+          // The daemon's grace branch keys on callerSessionId — without it the
+          // marker would be written but no restart would ever be supervised.
+          return { ok: false, detail: 'cannot identify the calling session — restart not scheduled' }
+        }
         doWrite({ callerSessionId, reason: typeof args.reason === 'string' ? args.reason : undefined }, 180_000)
         writeIntentSidecar(callerSessionId, args.reason)
-        return { ok: true, detail: callerSessionId ? `restart scheduled (≈30s) — caller ${callerSessionId}` : 'restart scheduled (≈30s)' }
+        return { ok: true, detail: `restart scheduled (≈30s) — caller ${callerSessionId}` }
       },
     })
   } catch (e: any) {
@@ -147,7 +188,9 @@ function writeIntentSidecar(sessionId: string | undefined, reason: string | unde
     const require = createRequire(import.meta.url)
     const { mkdirSync, writeFileSync, chmodSync } = require('node:fs') as typeof import('node:fs')
     mkdirSync(dir, { recursive: true })
-    const safeId = sessionId.replace(/[^A-Za-z0-9._/-]/g, '_')
+    // Flatten slash-namespaced ids ('proj/abc' → 'proj_abc') so the sidecar is
+    // a single file under intents/ and never needs a nested intents/proj/ dir.
+    const safeId = sessionId.replace(/[^A-Za-z0-9._-]/g, '_')
     writeFileSync(join(dir, `${safeId}.json`), JSON.stringify({ ts: Date.now(), sessionId, reason: reason ?? '' }), 'utf8')
     try { chmodSync(join(dir, `${safeId}.json`), 0o600) } catch {}
   } catch {}

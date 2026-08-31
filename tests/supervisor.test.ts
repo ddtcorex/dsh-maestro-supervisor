@@ -344,4 +344,63 @@ describe('caller restart-request handling', () => {
     supervisor.stop()
     vi.useRealTimers()
   })
+
+  it('re-arms the single-flight latch once the marker is cleared, handling a later request', async () => {
+    vi.useFakeTimers()
+    const restartWeb = vi.fn(async () => {})
+    let marker: any = { ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-1', reason: 'plugin v2' }
+    let cleared = 0
+    const supervisor = new Supervisor({
+      pollHealth: async () => ({ up: false }),
+      writeLKG: async () => ({ ts: '' } as any),
+      writeFailed: async () => ({ ts: '' } as any),
+      writeReport: async (o: any) => o.ts,
+      rollback: async () => {},
+      restartWeb,
+      notify: async () => {},
+      getTime: () => Date.now(),
+      writePlannedRestart: () => {},
+      readRestartRequest: () => marker,
+      clearPlannedRestart: () => { marker = undefined; cleared++ },
+    } as any)
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).toHaveBeenCalledTimes(1)
+    expect(cleared).toBe(1)
+    // Marker cleared → a fresh request is handled again.
+    marker = { ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-2', reason: 'again' }
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).toHaveBeenCalledTimes(2)
+    supervisor.stop()
+    vi.useRealTimers()
+  })
+
+  it('does not re-arm the single-flight latch when the marker clear fails', async () => {
+    vi.useFakeTimers()
+    const restartWeb = vi.fn(async () => {})
+    const supervisor = new Supervisor({
+      pollHealth: async () => ({ up: false }),
+      writeLKG: async () => ({ ts: '' } as any),
+      writeFailed: async () => ({ ts: '' } as any),
+      writeReport: async (o: any) => o.ts,
+      rollback: async () => {},
+      restartWeb,
+      notify: async () => {},
+      getTime: () => Date.now(),
+      writePlannedRestart: () => {},
+      readRestartRequest: () => ({ ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-1' }),
+      clearPlannedRestart: () => { throw new Error('disk error') },
+    } as any)
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).toHaveBeenCalledTimes(1)
+    // Clear failed → the marker is still present and the latch must NOT re-arm:
+    // a further tick must not fire a second restart for the same marker.
+    await supervisor.tick()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(restartWeb).toHaveBeenCalledTimes(1)
+    supervisor.stop()
+    vi.useRealTimers()
+  })
 })
