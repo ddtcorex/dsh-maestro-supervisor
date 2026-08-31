@@ -310,6 +310,9 @@ describe('caller restart-request handling', () => {
       notify,
       getTime: () => Date.now(),
       isPlannedRestartActive: async () => false,
+      // Hermetic: never write the real ~/.dsh/.supervisor/planned-restart.json
+      // (a live daemon and parallel test files contend on that path).
+      writePlannedRestart: () => {},
       readRestartRequest: () => req,
     } as any)
     await supervisor.tick()
@@ -332,6 +335,7 @@ describe('caller restart-request handling', () => {
       restartWeb,
       notify: async () => {},
       getTime: () => Date.now(),
+      writePlannedRestart: () => {},
       readRestartRequest: () => undefined,
     } as any)
     await supervisor.tick()

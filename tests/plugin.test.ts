@@ -307,6 +307,30 @@ describe('apply', () => {
     expect(() => apply(ctx)).not.toThrow()
   })
 
+  it('registers a tools/pre-execute self-kill guard via apply when ctx.on exists', () => {
+    const onCalls: any[] = []
+    const ctx = makeCtxWithEffect({ on: (ev: string, h: any) => { onCalls.push([ev, h]); return () => {} } })
+    expect(() => apply(ctx)).not.toThrow()
+    expect(onCalls.some(([ev]) => ev === 'tools/pre-execute')).toBe(true)
+  })
+
+  it('denies a bash self-kill through the pre-execute guard registered by apply', async () => {
+    let handler: any
+    const ctx = makeCtxWithEffect({ on: (ev: string, h: any) => { if (ev === 'tools/pre-execute') handler = h; return () => {} } })
+    apply(ctx)
+    expect(typeof handler).toBe('function')
+    const res = await handler({ name: 'bash', args: { command: 'systemctl --user restart dsh-web' } }, async () => ({ kind: 'allow' }))
+    expect(res).toMatchObject({ kind: 'deny' })
+    expect(res.reason).toContain('dsh_web_restart')
+    const benign = await handler({ name: 'bash', args: { command: 'ls -la' } }, async () => ({ kind: 'allow' }))
+    expect(benign).toEqual({ kind: 'allow' })
+  })
+
+  it('does not throw when ctx.on is missing entirely', () => {
+    const ctx = makeCtxWithEffect() // no on method
+    expect(() => apply(ctx)).not.toThrow()
+  })
+
   it('routes a loopback resume request to the in-process resume handler', async () => {
     const ctx = makeCtx()
     const resume = vi.fn(async () => ['proj/session-a'])

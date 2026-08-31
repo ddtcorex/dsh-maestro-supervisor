@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
 import { makeSkillProvider } from './skill-provider.js'
 import { registerRestartTool } from './restart-tool.js'
+import { makePreExecuteGuard } from './self-kill-guard.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -391,6 +392,18 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
         }
       }
     }, 'supervisor:auto-resume')
+
+    try {
+      // Deny bash/shell self-kill commands in-tree; the safe restart path is
+      // dsh_web_restart (supervisor daemon owns the actual restart).
+      const guard = makePreExecuteGuard()
+      ctx.effect(() => {
+        const un = ctx.on?.('tools/pre-execute', guard) ?? null
+        return () => { try { un?.() } catch {} }
+      }, 'supervisor:self-kill-guard')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] self-kill guard effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
   } catch (e: any) {
     try {
       ctx.logger?.warn?.(`[supervisor] auto-resume apply() failed: ${e?.message ?? String(e)}`)
