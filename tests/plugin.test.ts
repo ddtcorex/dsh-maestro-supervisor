@@ -265,6 +265,36 @@ describe('apply', () => {
     expect(inject).toContain('agents')
   })
 
+  it('declares skills in inject so the skills service exists when the provider registers', () => {
+    expect(inject).toContain('skills')
+  })
+
+  it('registers a skills provider via ctx.get(skills) that lists the dsh-safe-restart candidate and unregisters on dispose', async () => {
+    const unregisterSpy = vi.fn(() => {})
+    const registerProviderSpy = vi.fn(() => unregisterSpy)
+    const disposers: (() => void)[] = []
+    const ctx = makeCtxWithEffect({
+      effect: (fn: any) => { const d = fn(); disposers.push(d); return d },
+      get: (key: string) => (key === 'skills' ? { registerProvider: registerProviderSpy } : undefined),
+    })
+
+    expect(() => apply(ctx)).not.toThrow()
+
+    // registration went through the real apply() wiring, not a direct call
+    expect(registerProviderSpy).toHaveBeenCalledTimes(1)
+    const providerFactory = registerProviderSpy.mock.calls[0][0] as () => any
+    const provider = providerFactory()
+    const candidates = await provider.list({})
+    expect(candidates.map((c: any) => c.name)).toEqual(['dsh-safe-restart'])
+    expect(candidates[0].provider).toBe('maestro-supervisor')
+    expect(candidates[0].resourceBase?.path).toMatch(/skills[\\/]dsh-safe-restart$/)
+
+    // effect disposers clear the auto-resume timer/RPC and attempt skill deregistration without throwing
+    expect(disposers.length).toBeGreaterThanOrEqual(2)
+    expect(() => disposers.forEach((d) => d())).not.toThrow()
+    expect(unregisterSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('routes a loopback resume request to the in-process resume handler', async () => {
     const ctx = makeCtx()
     const resume = vi.fn(async () => ['proj/session-a'])

@@ -6,7 +6,7 @@
  * and web restart; this plugin handles the in-process resume.
  */
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js';
-export declare const inject: readonly ["sessions", "agents", "connection"];
+export declare const inject: readonly ["sessions", "agents", "connection", "skills"];
 export interface SupervisorPluginConfig {
     autoResumeWithin?: number | string;
     autoResumeEnabled?: boolean;

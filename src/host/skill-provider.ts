@@ -25,7 +25,8 @@ export function makeSkillProvider(skillsDir: string) {
       const skillFilePath = join(entry, 'SKILL.md')
       const fileSt = await stat(skillFilePath).catch(() => null)
       if (!fileSt?.isFile()) return []
-      const raw = await readFile(skillFilePath, 'utf-8')
+      const raw = await readFile(skillFilePath, 'utf-8').catch(() => null)
+      if (raw === null) return []
       const { name, description } = parseFrontmatter(raw)
       return [{
         name,

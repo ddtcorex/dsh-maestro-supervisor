@@ -7,16 +7,15 @@
  */
 
 import * as fs from 'node:fs'
-import { dirname } from 'node:path'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
 import { makeSkillProvider } from './skill-provider.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-export const inject = ['sessions', 'agents', 'connection'] as const
+export const inject = ['sessions', 'agents', 'connection', 'skills'] as const
 
 export interface SupervisorPluginConfig {
   autoResumeWithin?: number | string // in MINUTES if number, or "5m"/"30s"/"1h" string
@@ -267,6 +266,23 @@ export function createResumeRpcHandler(
   }
 }
 
+/** Resolve the package-root skills/ dir regardless of module layout. The built
+ * host lib is flat (lib/plugin.js → ../skills), but under vitest the same
+ * module loads from src/host/ (→ ../../skills). Walking to the nearest
+ * package.json yields the same package-root skills/ in both layouts. */
+function resolveSkillsDir(fromDir: string): string {
+  let dir = fromDir
+  for (let i = 0; i < 6; i++) {
+    try {
+      if (fs.existsSync(path.join(dir, 'package.json'))) return path.join(dir, 'skills')
+    } catch {}
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return path.join(fromDir, '..', 'skills')
+}
+
 function ensureSystemdKeepalive(ctx: any): void {
   // Best-effort: ensure dsh-web-keepalive.service exists and is enabled, and linger is on.
   // This is the user-level auto-fix for the 11:42:58 crash where manager session 97
@@ -324,9 +340,9 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
         ctx.effect(() => {
           let unregister: (() => void) | undefined
           try {
-            // Built host lib is flat (lib/plugin.js); package-root skills/ is one
-            // directory above lib/. Never a hardcoded path — resolved at runtime.
-            unregister = skills.registerProvider(() => makeSkillProvider(path.resolve(__dirname, '../skills')))
+            // Package-root skills/ is resolved at runtime by walking to the
+            // nearest package.json (robust to lib/ vs src/host/ layouts).
+            unregister = skills.registerProvider(() => makeSkillProvider(resolveSkillsDir(__dirname)))
           } catch (e: any) { ctx.logger?.warn?.(`[supervisor] skill provider failed: ${e?.message ?? String(e)}`) }
           return () => { try { unregister?.() } catch {} }
         }, 'supervisor:skill')
