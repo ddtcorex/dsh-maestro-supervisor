@@ -30,6 +30,16 @@ export declare function dryBootVerify(harnessRoot: string, opts?: {
     ok: boolean;
     detail: string;
 }>;
+/**
+ * Classify a failed dry-boot's log tail into a precise one-line detail. The
+ * most common operator-actionable failure is an EADDRINUSE — the candidate
+ * collided with the live dsh web tree on :3000/:3080 or with another process
+ * on the ephemeral 9000-9999 port — so name the colliding port instead of
+ * reporting a generic boot failure. Plugin-tree load errors keep their stable
+ * codes (the caller's refused message reads `dry-boot failed — restart
+ * refused. <detail>`).
+ */
+export declare function dryBootFailureDetail(tail: string, exitCode: number): string;
 /** Minimal file metadata the drift check reads; injectable for deterministic tests. */
 export interface FileStat {
     mtimeMs: number;

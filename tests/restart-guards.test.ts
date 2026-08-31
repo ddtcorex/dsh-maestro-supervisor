@@ -72,8 +72,8 @@ describe('buildKillStalePortsCommand', () => {
 describe('isSelfCopyError', () => {
   it('recognizes the literal error message this bug produced in production', () => {
     expect(isSelfCopyError(
-      'Cannot copy /home/kai/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position ' +
-      'to a subdirectory of self /home/kai/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position',
+      'Cannot copy /home/example/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position ' +
+      'to a subdirectory of self /home/example/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position',
     )).toBe(true)
   })
 
