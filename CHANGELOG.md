@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-08-31
+
+### Added
+
+- Pass through `reasoningEffort` from supervisor config to the debug-agent LLM provider/model selection (`AI_REASONING_EFFORT` → `supervisor.model.reasoningEffort` → `review.model.reasoningEffort` → settings), closing the unified model picker gap.
+
+### Fixed
+
+- Stop false-positive rollback/restart caused by the overly broad `JSON`/`YAML` log matchers: benign log lines whose payload merely contained those substrings (e.g. maestro-sync status JSON listing `session.jsonl.zstd` / `settings.json` paths) were treated as boot errors, turning a healthy `HTTP 401` into a rollback + `dsh-web` restart. The health-poller now matches only specific parse/boot errors (`SyntaxError`, `YAMLParseError`, `ParseError`, …), with a regression test asserting JSON status logs stay healthy.
+
 ## [0.6.6] - 2026-08-30
 
 ### Fixed
