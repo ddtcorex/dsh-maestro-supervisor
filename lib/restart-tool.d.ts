@@ -35,11 +35,14 @@ export interface FileStat {
     mtimeMs: number;
 }
 /**
- * Whether the live plugin tree differs from the latest LKG snapshot. Two
+ * Whether the live plugin tree differs from the latest LKG snapshot. Three
  * signals are combined:
  *
  *   1. manifest drift — the live profile's web `package.json` text vs baseline;
- *   2. plugin-lib drift — any `@ddtcorex` plugin `lib/` file newer than the
+ *   2. cordis patch drift — the live profile's web `cordis.patch.yml` text vs
+ *      baseline (a patch-only config edit changes the boot-time row wiring
+ *      without touching the manifest — the manifest check alone misses it);
+ *   3. plugin-lib drift — any `@ddtcorex` plugin `lib/` file newer than the
  *      snapshot moment. Link-installed plugins resolve to the same workspace
  *      files in both live and LKG, so the stored copies cannot be compared
  *      byte-wise; the snapshot itself is the meaningful baseline and a rebuilt
