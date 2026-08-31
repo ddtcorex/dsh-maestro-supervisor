@@ -240,6 +240,9 @@ describe('isPluginTreeChanged', () => {
     const lkgWeb = join(lkgSnap, 'profiles/web')
     mkdirSync(lkgWeb, { recursive: true })
     writeFileSync(join(lkgWeb, 'package.json'), JSON.stringify({ version: '1' }))
+    // writeLKG writes manifest.json last — its FILE mtime is the authoritative
+    // snapshot moment (dir utimes are unreliable on CI runners).
+    writeFileSync(join(lkgSnap, 'manifest.json'), JSON.stringify({ files: [] }))
     const liveWeb = join(fakeHome, '.dsh/profiles/web')
     mkdirSync(liveWeb, { recursive: true })
     writeFileSync(join(liveWeb, 'package.json'), JSON.stringify({ version: '1' }))
@@ -248,7 +251,7 @@ describe('isPluginTreeChanged', () => {
     writeFileSync(libFile, 'export const x = 1')
     const past = new Date('2026-01-01T00:00:00Z').getTime()
     const later = new Date('2026-01-05T00:00:00Z').getTime()
-    utimesSync(lkgSnap, past, past) // snapshot moment baseline
+    utimesSync(join(lkgSnap, 'manifest.json'), past, past) // snapshot moment baseline (file utimes)
     utimesSync(libFile, past, past) // lib aligned with baseline → unchanged
     expect(isPluginTreeChanged(fakeHome)).toBe(false)
     utimesSync(libFile, later, later) // rebuilt after the snapshot

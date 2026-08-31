@@ -38,9 +38,11 @@ export declare function dryBootVerify(harnessRoot: string, opts?: {
  *   2. plugin-lib drift — any `@ddtcorex` plugin `lib/` file newer than the
  *      snapshot moment. Link-installed plugins resolve to the same workspace
  *      files in both live and LKG, so the stored copies cannot be compared
- *      byte-wise; the snapshot dir's own mtime is the meaningful baseline and a
- *      rebuilt `lib/` bumps a file past it even when the manifest text is
- *      unchanged.
+ *      byte-wise; the snapshot itself is the meaningful baseline and a rebuilt
+ *      `lib/` bumps a file past it even when the manifest text is unchanged.
+ *      writeLKG writes `manifest.json` LAST, so its FILE mtime is the
+ *      authoritative snapshot moment (dir utimes are unreliable on CI runners);
+ *      the snapshot dir mtime is only a fallback for legacy snapshots.
  *
  * No LKG baseline, a missing file on either side, or any read error means
  * "changed" — the caller falls back to the dry-boot gate.
