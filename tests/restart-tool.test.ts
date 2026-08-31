@@ -218,6 +218,40 @@ describe('dryBootVerify', () => {
   })
 })
 
+describe('dryBootFailureDetail', () => {
+  it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
+    const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
+    const tail = [
+      'node:internal/modules/esm/loader',
+      'Error: listen EADDRINUSE: address already in use :::3000',
+      '    at Server.setupListenHandle [as _listen] (node:net:...:1)',
+    ].join('\n')
+    const detail = dryBootFailureDetail(tail, 1)
+    expect(detail).toMatch(/EADDRINUSE/)
+    expect(detail).toContain('port 3000')
+    expect(detail).toMatch(/already in use/)
+  })
+
+  it('names the colliding port for an EADDRINUSE in the ephemeral 9000-9999 range', async () => {
+    const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
+    const detail = dryBootFailureDetail('Error: listen EADDRINUSE: address already in use :::9417', 1)
+    expect(detail).toMatch(/EADDRINUSE/)
+    expect(detail).toContain('port 9417')
+  })
+
+  it('keeps the load-error classifier for plugin-tree boot failures', async () => {
+    const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
+    const detail = dryBootFailureDetail(
+      "node:internal/errors:... ERR_MODULE_NOT_FOUND: Cannot find package 'x/plugin'", 7)
+    expect(detail).toMatch(/ERR_MODULE_NOT_FOUND/)
+  })
+
+  it('falls back to the generic exit detail when nothing is classified', async () => {
+    const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
+    expect(dryBootFailureDetail('some other log line', 3)).toBe('dry-boot failed (exit 3)')
+  })
+})
+
 describe('isPluginTreeChanged', () => {
   it('assumes changed when no LKG baseline exists', () => {
     expect(isPluginTreeChanged(fakeHome, join(fakeHome, 'lkg-missing'))).toBe(true)
@@ -265,6 +299,40 @@ describe('isPluginTreeChanged', () => {
     // lib rebuilt AFTER the snapshot (2000 > manifest 1000) → changed
     stats.set(libFile, { mtimeMs: 2000 })
     expect(isPluginTreeChanged(fakeHome, undefined, { statFile })).toBe(true)
+  })
+
+  it('detects a live cordis.patch.yml different from the LKG snapshot even when the manifest is identical', () => {
+    const lkgSnap = join(fakeHome, '.dsh/.supervisor/lkg/2026-01-01T00-00-00-000Z')
+    const lkgWeb = join(lkgSnap, 'profiles/web')
+    mkdirSync(lkgWeb, { recursive: true })
+    const manifest = JSON.stringify({ version: '0.7.0' })
+    writeFileSync(join(lkgWeb, 'package.json'), manifest)
+    writeFileSync(join(lkgWeb, 'cordis.patch.yml'), 'maestro-supervisor:\n  config:\n    autoResumeWithin: 5\n')
+    writeFileSync(join(lkgSnap, 'manifest.json'), JSON.stringify({ files: [] }))
+    const liveWeb = join(fakeHome, '.dsh/profiles/web')
+    mkdirSync(liveWeb, { recursive: true })
+    writeFileSync(join(liveWeb, 'package.json'), manifest)
+    // same manifest + same patch → unchanged
+    writeFileSync(join(liveWeb, 'cordis.patch.yml'), 'maestro-supervisor:\n  config:\n    autoResumeWithin: 5\n')
+    expect(isPluginTreeChanged(fakeHome)).toBe(false)
+    // patch-only edit → changed (the manifest-driven check alone would miss it)
+    writeFileSync(join(liveWeb, 'cordis.patch.yml'), 'maestro-supervisor:\n  config:\n    autoResumeWithin: 10\n')
+    expect(isPluginTreeChanged(fakeHome)).toBe(true)
+  })
+
+  it('treats a patch file present on only one side as changed', () => {
+    const lkgSnap = join(fakeHome, '.dsh/.supervisor/lkg/2026-01-01T00-00-00-000Z')
+    const lkgWeb = join(lkgSnap, 'profiles/web')
+    mkdirSync(lkgWeb, { recursive: true })
+    const manifest = JSON.stringify({ version: '0.7.0' })
+    writeFileSync(join(lkgWeb, 'package.json'), manifest)
+    writeFileSync(join(lkgSnap, 'manifest.json'), JSON.stringify({ files: [] }))
+    const liveWeb = join(fakeHome, '.dsh/profiles/web')
+    mkdirSync(liveWeb, { recursive: true })
+    writeFileSync(join(liveWeb, 'package.json'), manifest)
+    // live gained a cordis.patch.yml the LKG snapshot predates
+    writeFileSync(join(liveWeb, 'cordis.patch.yml'), 'maestro-supervisor:\n  config:\n    autoResumeWithin: 5\n')
+    expect(isPluginTreeChanged(fakeHome)).toBe(true)
   })
 
   it('falls back to changed when the stat reader errors on the live tree (dry-boot gate)', () => {

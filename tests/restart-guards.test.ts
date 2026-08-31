@@ -1,10 +1,45 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import {
   buildKillStalePortsCommand,
   clearPlannedRestart,
+  checkPlannedRestart,
+  isSelfCopyError,
+  isPlannedRestartFresh,
   readRestartRequest,
+  writePlannedRestart,
   writeRestartRequest,
 } from '../src/host/restart-guards.js'
+
+// Point os.homedir() at a per-file temp home so every restart marker (the
+// planned-restart.json JSON AND the legacy plain file) lands under the temp
+// dir instead of the real ~/.dsh. Without this the restart-guards tests
+// collided with the LIVE dsh-web-supervisor daemon: under parallel vitest it
+// reads/writes the real ~/.dsh/.supervisor/planned-restart.json at the same
+// moment the daemon's health poll checks it, producing intermittent failures
+// that blocked pushes.
+let fakeHome = ''
+beforeEach(() => {
+  fakeHome = mkdtempSync(join(tmpdir(), 'dsh-restart-guards-home-'))
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+afterAll(() => {
+  if (fakeHome) {
+    try { rmSync(fakeHome, { recursive: true, force: true }) } catch {}
+  }
+})
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return {
+    ...actual,
+    homedir: () => fakeHome,
+  }
+})
 
 describe('buildKillStalePortsCommand', () => {
   it('only kills :3080, never :3000', () => {
@@ -35,57 +70,48 @@ describe('buildKillStalePortsCommand', () => {
 })
 
 describe('isSelfCopyError', () => {
-  it('recognizes the literal error message this bug produced in production', async () => {
-    const { isSelfCopyError } = await import('../src/host/restart-guards.js')
+  it('recognizes the literal error message this bug produced in production', () => {
     expect(isSelfCopyError(
-      'Cannot copy /home/kai/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position ' +
-      'to a subdirectory of self /home/kai/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position',
+      'Cannot copy /home/example/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position ' +
+      'to a subdirectory of self /home/example/.npm/_npx/1e7f6d9597241db0/node_modules/unist-util-position',
     )).toBe(true)
   })
 
-  it('still recognizes the older "cannot be the same" phrasing', async () => {
-    const { isSelfCopyError } = await import('../src/host/restart-guards.js')
+  it('still recognizes the older "cannot be the same" phrasing', () => {
     expect(isSelfCopyError('src and dest cannot be the same')).toBe(true)
   })
 
-  it('does not swallow unrelated errors', async () => {
-    const { isSelfCopyError } = await import('../src/host/restart-guards.js')
+  it('does not swallow unrelated errors', () => {
     expect(isSelfCopyError('ENOENT: no such file or directory')).toBe(false)
   })
 })
 
 describe('isPlannedRestartFresh', () => {
-  it('is fresh when mtime is recent', async () => {
-    const { isPlannedRestartFresh } = await import('../src/host/restart-guards.js')
+  it('is fresh when mtime is recent', () => {
     expect(isPlannedRestartFresh(1000, 1000 + 60_000, 180_000)).toBe(true)
   })
 
-  it('is stale once mtime is older than the TTL', async () => {
-    const { isPlannedRestartFresh } = await import('../src/host/restart-guards.js')
+  it('is stale once mtime is older than the TTL', () => {
     expect(isPlannedRestartFresh(0, 200_000, 180_000)).toBe(false)
   })
 
-  it('treats the exact TTL boundary as stale (strictly less-than)', async () => {
-    const { isPlannedRestartFresh } = await import('../src/host/restart-guards.js')
+  it('treats the exact TTL boundary as stale (strictly less-than)', () => {
     expect(isPlannedRestartFresh(0, 180_000, 180_000)).toBe(false)
   })
 })
 
 describe('planned restart marker 30s', () => {
-  it('planned restart marker 30s', async () => {
-    const { writePlannedRestart, checkPlannedRestart, clearPlannedRestart } = await import('../src/host/restart-guards.js')
-    const fs = await import('node:fs')
-    const os = await import('node:os')
-    const path = await import('node:path')
+  it('writes/reads the marker under the temp home only (never the real ~/.dsh)', () => {
     clearPlannedRestart()
     expect(checkPlannedRestart()).toBe(false)
     writePlannedRestart(30000)
     expect(checkPlannedRestart()).toBe(true)
-    const p = path.join(os.homedir(), '.dsh/.supervisor/planned-restart.json')
-    const j = JSON.parse(fs.readFileSync(p, 'utf8'))
+    const marker = join(fakeHome, '.dsh/.supervisor/planned-restart.json')
+    const j = JSON.parse(readFileSync(marker, 'utf8'))
     expect(j.ttl).toBe(30000)
     expect(typeof j.ts).toBe('number')
     clearPlannedRestart()
+    expect(checkPlannedRestart()).toBe(false)
   })
 })
 
@@ -98,6 +124,8 @@ describe('restart-request marker', () => {
     expect(req?.callerSessionId).toBe('proj/s-1')
     expect(req?.reason).toBe('applied plugin v2')
     expect(req?.ttl).toBe(180_000)
+    // the marker really lives under the temp home — prove no real ~/.dsh touch
+    expect(readFileSync(join(fakeHome, '.dsh/.supervisor/planned-restart.json'), 'utf8')).toContain('proj/s-1')
     clearPlannedRestart()
   })
 

@@ -57,7 +57,8 @@ export async function dryBootVerify(harnessRoot: string, opts: { timeoutMs?: num
     }
     const tail = logs.join('').slice(-3000)
     const loadErr = /ERR_MODULE_NOT_FOUND|assertChannel|must declare output|failed to apply loader entry/.exec(tail)
-    return { ok: code === 0 && !loadErr, detail: loadErr ? loadErr[0] : (code === 0 ? 'dry-boot ok' : `dry-boot failed (exit ${code})`) }
+    if (code === 0 && !loadErr) return { ok: true, detail: 'dry-boot ok' }
+    return { ok: false, detail: dryBootFailureDetail(tail, code) }
   } catch (e: any) {
     return { ok: false, detail: `dry-boot error: ${e?.message ?? String(e)}` }
   } finally {
@@ -70,15 +71,38 @@ export async function dryBootVerify(harnessRoot: string, opts: { timeoutMs?: num
   }
 }
 
+/**
+ * Classify a failed dry-boot's log tail into a precise one-line detail. The
+ * most common operator-actionable failure is an EADDRINUSE — the candidate
+ * collided with the live dsh web tree on :3000/:3080 or with another process
+ * on the ephemeral 9000-9999 port — so name the colliding port instead of
+ * reporting a generic boot failure. Plugin-tree load errors keep their stable
+ * codes (the caller's refused message reads `dry-boot failed — restart
+ * refused. <detail>`).
+ */
+export function dryBootFailureDetail(tail: string, exitCode: number): string {
+  const addrInUse = /EADDRINUSE[^]*?:(\d+)/.exec(tail)
+  if (addrInUse) {
+    const port = addrInUse[1]
+    return `dry-boot failed: port ${port} already in use (EADDRINUSE) — the live dsh web tree or another process holds it`
+  }
+  const loadErr = /ERR_MODULE_NOT_FOUND|assertChannel|must declare output|failed to apply loader entry/.exec(tail)
+  if (loadErr) return `dry-boot failed: ${loadErr[0]}`
+  return `dry-boot failed (exit ${exitCode})`
+}
+
 /** Minimal file metadata the drift check reads; injectable for deterministic tests. */
 export interface FileStat { mtimeMs: number }
 
 /**
- * Whether the live plugin tree differs from the latest LKG snapshot. Two
+ * Whether the live plugin tree differs from the latest LKG snapshot. Three
  * signals are combined:
  *
  *   1. manifest drift — the live profile's web `package.json` text vs baseline;
- *   2. plugin-lib drift — any `@ddtcorex` plugin `lib/` file newer than the
+ *   2. cordis patch drift — the live profile's web `cordis.patch.yml` text vs
+ *      baseline (a patch-only config edit changes the boot-time row wiring
+ *      without touching the manifest — the manifest check alone misses it);
+ *   3. plugin-lib drift — any `@ddtcorex` plugin `lib/` file newer than the
  *      snapshot moment. Link-installed plugins resolve to the same workspace
  *      files in both live and LKG, so the stored copies cannot be compared
  *      byte-wise; the snapshot itself is the meaningful baseline and a rebuilt
@@ -110,6 +134,15 @@ export function isPluginTreeChanged(
     const liveManifest = join(live, 'package.json')
     if (!existsSync(lkgManifest) || !existsSync(liveManifest)) return true
     if (readFileSync(liveManifest, 'utf8') !== readFileSync(lkgManifest, 'utf8')) return true
+    // cordis.patch.yml — compare only when at least one side has it (profiles
+    // without a patch are the baseline; a patch appearing on either side alone
+    // is drift). The text compare keeps the check cheap and hermetic.
+    const lkgPatch = join(lkgHome, 'cordis.patch.yml')
+    const livePatch = join(live, 'cordis.patch.yml')
+    if (existsSync(lkgPatch) || existsSync(livePatch)) {
+      if (!existsSync(lkgPatch) || !existsSync(livePatch)) return true
+      if (readFileSync(livePatch, 'utf8') !== readFileSync(lkgPatch, 'utf8')) return true
+    }
     const snapshotManifest = join(lkgDir, latest, 'manifest.json')
     const baseline = existsSync(snapshotManifest)
       ? statFile(snapshotManifest).mtimeMs
