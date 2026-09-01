@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-09-01
+
+### Fixed
+
+- Self-kill guard matches the executed command surface, not raw text: quoted
+  spans and heredoc bodies (including backslash-escaped quotes) are treated as
+  data, so analysis scripts, echoes and node -e bodies that merely mention
+  kill-family words are no longer denied. Real invocations (a kill-family verb
+  at the command position, targeted restart patterns, pid-targeted kills of the
+  dsh-web tree) stay denied, and a command that is JUST `kill <unrelated-pid>`
+  stays allowed.
+
 ## [0.7.1] - 2026-09-01
 
 ### Fixed
