@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-09-01
+
+### Added
+
+- Session-log health scan (`session-health`): detects a session log whose first
+  zstd frame is not exactly one header line, re-encodes the recoverable
+  single-whole-file-frame layout back to canonical multi-frame (payload
+  preserved byte-for-byte, `.corrupt-singleframe.bak` sidecar), and quarantines
+  garbage. Wired as a non-fatal pre-flight in the `dsh-safe-restart` recipe,
+  a loopback RPC (`/dsh-maestro-supervisor-session-health`), and the
+  `maestro_session_health` host tool — one corrupt log can no longer brick the
+  whole plugin-tree boot (2026-09-01 crash-loop incident).
+- Resume core-tool probe (`resume-tools`): after an auto-resume, the plugin
+  probes the resumed session's tool view for `bash`, logs
+  `[supervisor] resumed <id>: bash=<bool> …`, and on loss notifies + injects a
+  tool-inventory system message (the model stops calling the missing tool).
+  `resumeCoreToolPolicy: 'warn' | 'park'` (default warn; park flags a manual
+  reopen) + `maestro_resume_tool_health` RPC/tool.
+
+### Changed
+
+- **LLM auto-debug removed entirely**: the supervisor never calls a model.
+  Rule-based `autoFixKnownPatterns` + dry-boot transient detection + attempt/
+  cooldown gating are kept; failure `reason` strings are LLM-free.
+
+### Fixed
+
+- Session-health classifier is stack-safe on many-frame logs (bounded 64KiB
+  first-frame probe) and skips whole-file decode for healthy first-frame logs
+  (~17s vs ~6–8min for 843 session logs).
+
 ## [0.7.2] - 2026-09-01
 
 ### Fixed
