@@ -158,3 +158,34 @@ describe('makePreExecuteGuard', () => {
     expect(await guard(unrelated, async () => ({ kind: 'allow' }))).toEqual({ kind: 'allow' })
   })
 })
+
+describe('self-kill guard: kill-family words as DATA, not commands (false-positive class)', () => {
+  it('allows echo/printf text that merely mentions kill-family commands', () => {
+    expect(isSelfKillCommand('echo "pkill -f dsh web"', [848894])).toBe(false)
+    expect(isSelfKillCommand("printf '%s\\n' 'killall dsh'", [848894])).toBe(false)
+    expect(isSelfKillCommand('echo please do not kill -9 anything', [848894])).toBe(false)
+  })
+  it('allows node -e / script bodies that quote the phrasings', () => {
+    expect(isSelfKillCommand('node -e "console.log(\'pkill -f chrome\')"', [848894])).toBe(false)
+    expect(isSelfKillCommand('node --input-type=module -e "import x from \'./lib\'; x()"', [848894])).toBe(false)
+  })
+  it('allows escaped-quote nesting (live probe case: node -e with inner quoted literals)', () => {
+    expect(isSelfKillCommand('node -e "console.log(\'echo \\\"pkill -f dsh web\\\"\')"', [848894])).toBe(false)
+    expect(isSelfKillCommand('node -e "run(\'killall dsh\')"', [848894])).toBe(false)
+  })
+  it('allows heredoc bodies that mention kill-family commands', () => {
+    expect(isSelfKillCommand("cat <<'EOF'\nrun pkill -f dsh web\nand killall -9 some service\ndone\nEOF\n", [848894])).toBe(false)
+  })
+  it('allows grep/analysis commands referencing the words', () => {
+    expect(isSelfKillCommand('grep -l "killall dsh" *.sh', [848894])).toBe(false)
+  })
+  it('keeps real kills and restarts denied, including quoted targets', () => {
+    expect(isSelfKillCommand('pkill -f "dsh web"', [])).toBe(true)
+    expect(isSelfKillCommand('killall dsh', [])).toBe(true)
+    expect(isSelfKillCommand('systemctl --user restart dsh-web', [])).toBe(true)
+    expect(isSelfKillCommand('ss -tlnp | grep 3080 | xargs kill', [])).toBe(true)
+    expect(isSelfKillCommand('kill 848894', [848894])).toBe(true)
+    expect(isSelfKillCommand('bash /tmp/restart-dsh-web.sh --auto', [])).toBe(true)
+    expect(isSelfKillCommand('kill -9 1234 && pkill -f "dsh web"', [848894])).toBe(true)
+  })
+})
