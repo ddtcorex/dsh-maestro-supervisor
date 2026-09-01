@@ -37,13 +37,20 @@ export interface SessionHealthEntry {
     remark?: string;
 }
 /**
- * Classify a single session log file per the validated algorithm:
- * whole-file decode success guards 'corrupt', otherwise the first-frame head
- * (bounded to 64 KiB) decides 'ok' (header-only first frame) vs the
- * recoverable 'single-frame-whole-log'. A missing first-frame boundary within
- * the cap means the first frame is bigger than 64 KiB — never a canonical
- * healthy log — so it classifies as 'single-frame-whole-log'. Empty files are
- * not session logs.
+ * Classify a single session log file per the validated algorithm.
+ *
+ * Fast path (dominant case): classify a healthy multi-frame log from its first
+ * frame alone — the bounded 64 KiB head probe finds the first-frame boundary,
+ * decodes just that frame, and a header-only first frame means `ok` WITHOUT
+ * ever decoding the whole file.
+ *
+ * Whole-file decode is ONLY the fallback corrupt gate:
+ *  - first frame decodes but is multi-line (or the probe found no boundary
+ *    within 64 KiB — a first frame bigger than the cap is never a canonical
+ *    healthy log): whole decode throws → 'corrupt-first-frame', succeeds →
+ *    'single-frame-whole-log' (whole decodes to exactly one line → 'ok').
+ *
+ * Empty files are not session logs.
  */
 export declare function classifySessionLog(path: string): Promise<SessionHealthEntry>;
 /**

@@ -61,13 +61,21 @@ type FrameHead = { found: true; end: number } | { found: false }
  * Smallest head prefix at which the streaming decoder first emits output
  * (≈ first-frame completion), searched only within FIRST_FRAME_CAP. Never
  * pushes more than the cap into the decoder, so the probe is stack-safe on
- * arbitrarily large many-frame logs.
+ * arbitrarily large many-frame logs. A push that throws on invalid bytes past
+ * the first decoded frame is harmless to the boundary search — once the first
+ * frame has emitted (`fired`), the boundary is already known, so the throw is
+ * swallowed. Only garbage that decodes nothing yields `{ found: false }`.
  */
 function firstFrameHead(buf: Buffer): FrameHead {
   const emits = (len: number): boolean => {
     let fired = false
     const d = new Decompress((chunk) => { if (chunk.length > 0) fired = true })
-    d.push(buf.subarray(0, len))
+    try {
+      d.push(buf.subarray(0, len))
+    } catch {
+      // Invalid bytes past the first frame (corrupt tail): the decoder had
+      // already emitted the first frame's output → keep `fired` as-is.
+    }
     return fired
   }
   const cap = Math.min(buf.length, FIRST_FRAME_CAP)
@@ -86,25 +94,40 @@ function isSingleHeaderLine(plain: Buffer): boolean {
 }
 
 /**
- * Classify a single session log file per the validated algorithm:
- * whole-file decode success guards 'corrupt', otherwise the first-frame head
- * (bounded to 64 KiB) decides 'ok' (header-only first frame) vs the
- * recoverable 'single-frame-whole-log'. A missing first-frame boundary within
- * the cap means the first frame is bigger than 64 KiB — never a canonical
- * healthy log — so it classifies as 'single-frame-whole-log'. Empty files are
- * not session logs.
+ * Classify a single session log file per the validated algorithm.
+ *
+ * Fast path (dominant case): classify a healthy multi-frame log from its first
+ * frame alone — the bounded 64 KiB head probe finds the first-frame boundary,
+ * decodes just that frame, and a header-only first frame means `ok` WITHOUT
+ * ever decoding the whole file.
+ *
+ * Whole-file decode is ONLY the fallback corrupt gate:
+ *  - first frame decodes but is multi-line (or the probe found no boundary
+ *    within 64 KiB — a first frame bigger than the cap is never a canonical
+ *    healthy log): whole decode throws → 'corrupt-first-frame', succeeds →
+ *    'single-frame-whole-log' (whole decodes to exactly one line → 'ok').
+ *
+ * Empty files are not session logs.
  */
 export async function classifySessionLog(path: string): Promise<SessionHealthEntry> {
   let buf: Buffer
   try { buf = readFileSync(path) } catch { return { path, klass: 'not-a-session-log' } }
   if (buf.length === 0) return { path, klass: 'not-a-session-log' }
-  try { decompress(buf) } catch { return { path, klass: 'corrupt-first-frame' } }
   const head = firstFrameHead(buf)
   if (head.found) {
     let first: Buffer | undefined
     try { first = Buffer.from(decompress(buf.subarray(0, head.end))) } catch { /* prefix not a complete frame */ }
     if (first?.byteLength !== undefined && isSingleHeaderLine(first)) return { path, klass: 'ok' }
+    // First frame decodes but is multi-line (or the prefix is not a complete
+    // frame): the whole file must still decode for this to be recoverable.
+    try { decompress(buf) } catch { return { path, klass: 'corrupt-first-frame' } }
+    return { path, klass: 'single-frame-whole-log' }
   }
+  // No frame boundary within the cap — first frame is bigger than 64 KiB, never
+  // a canonical healthy log. The whole-file decode is authoritative.
+  let whole: Buffer
+  try { whole = Buffer.from(decompress(buf)) } catch { return { path, klass: 'corrupt-first-frame' } }
+  if (isSingleHeaderLine(whole)) return { path, klass: 'ok' }
   return { path, klass: 'single-frame-whole-log' }   // whole-file decodes; first frame isn't header-only → recoverable
 }
 

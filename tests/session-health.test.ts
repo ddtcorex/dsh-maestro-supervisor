@@ -37,6 +37,21 @@ describe('session health scan', () => {
       expect((await classifySessionLog(join(dir, 'session.jsonl.zstd'))).klass).toBe('corrupt-first-frame')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
+  it('classifies ok from the first frame alone when the tail is undecodable garbage (no whole-file decode)', async () => {
+    // Perf regression: classifySessionLog must never decode the whole file for
+    // the dominant healthy case. This fixture has a valid header-only first
+    // frame followed by 512 random bytes that are NOT valid zstd — whole-file
+    // decompress THROWS on it (asserted below), so the only way classify can
+    // return 'ok' is by bounding its decode to the first frame (≤ 64 KiB head).
+    const dir = mkdtempSync(join(tmpdir(), 'sh-nowhole-'))
+    try {
+      const path = join(dir, 'session.jsonl.zstd')
+      const fixture = Buffer.concat([compress(Buffer.from(header('sNowhole'))), randomBytes(512)])
+      writeFileSync(path, fixture)
+      expect(() => decompress(fixture)).toThrow() // sanity: whole-file decode is impossible on this file
+      expect((await classifySessionLog(path)).klass).toBe('ok')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
   it('repairSingleFrameLog re-encodes to a header-only first frame and preserves payload byte-for-byte', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sh-repair-'))
     try {
