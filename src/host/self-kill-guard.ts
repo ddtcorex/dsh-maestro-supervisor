@@ -11,9 +11,36 @@ const require = createRequire(import.meta.url)
 
 // Patterns that restart/stop/start or kill dsh web (systemctl --user units,
 // pkill/killall over the dsh tree, killing holders of :3080, and the
-// dsh-safe-web-update helper itself). The bare `kill\s+` alternative is
-// narrowed below so a kill of an unrelated pid is not denied as a self-kill.
-const SELF_KILL_RE = /(systemctl\s+--?user\s+.*(restart|stop|start).*dsh-web|pkill\s+.*dsh|killall\s+.*dsh|ss\s+.*3080.*kill|restart-dsh-web|kill\s+)/i
+// dsh-safe-web-update helper itself). Matched — like dsh-maestro-guard —
+// against the executed command surface with quoted/heredoc spans stripped, so
+// text that merely MENTIONS these words (echo/printf/script bodies) is data,
+// not argv.
+const SELF_KILL_RE = /(systemctl\s+--?user\s+.*(restart|stop|start).*dsh-web|pkill\s+.*dsh|killall\s+.*dsh|ss\s+.*3080.*kill|restart-dsh-web)/i
+
+// A segment whose command position is one of these verbs is a real kill-family
+// invocation: blanket-denied even when its target lives inside quotes
+// (`pkill -f "dsh web"` must still be caught). `sudo`/`env VAR=` prefixes are
+// stripped before the verb is read.
+const DANGEROUS_KILL_VERB = /^(?:sudo\s+|env\s+\S+\s+)*(pkill|killall|kill|systemctl)\b/i
+
+/**
+ * Remove data spans (quoted strings and heredoc bodies) from a command before
+ * self-kill matching. Text inside quotes or a heredoc is content — an echo,
+ * printf, node -e script or cat <<'EOF' body can legitimately discuss kill
+ * commands without executing one.
+ */
+export function stripDataSpans(cmd: string): string {
+  let out = cmd
+  let prev = ''
+  while (out !== prev) {
+    prev = out
+    // heredoc FIRST: the `<<'EOF'` delimiter quotes would otherwise be eaten by
+    // the generic quote-strip below and the body would survive as unquoted text
+    out = out.replace(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?[^\r\n]*\r?\n[\s\S]*?^\1\s*$/gm, ' ')
+    out = out.replace(/"[^"]*"/g, ' ').replace(/'[^']*'/g, ' ')
+  }
+  return out
+}
 
 /**
  * The dsh web MainThread owns both ports (3000 = gitlab-webhook, 3080 = web).
@@ -108,16 +135,24 @@ export function resolveDshWebTreePids(
  * denied.
  */
 export function isSelfKillCommand(cmd: string, livePids: number[]): boolean {
+  // pid-targeted kill: an exact live pid is a self-kill regardless of context
   if (/kill\s+(?:-\S+\s+)?(\d+)/i.test(cmd)) {
     const pid = Number(cmd.match(/kill\s+(?:-\S+\s+)?(\d+)/i)?.[1])
     if (livePids.includes(pid)) return true
   }
-  return SELF_KILL_RE.test(cmd)
-    // Exclude only a command that is JUST `kill [flags] <unrelated pid>` —
+  // Targeted patterns may span segments (`ss ... | grep 3080 | xargs kill`),
+  // so test the stripped full text once, then verbs per segment.
+  const stripped = stripDataSpans(cmd)
+  if (SELF_KILL_RE.test(stripped)) return true
+  for (const seg of stripped.split(/\s*(?:&&|\|\||;|\||\r?\n)+\s*/)) {
+    // Exclude ONLY a command that is JUST `kill [flags] <unrelated pid>` —
     // anchored end-to-end so `kill 1234 && systemctl restart dsh-web` cannot
     // whitelist the compound through its prefix.
-    && !/^kill\s+(?:-\S+\s+)?\d+\s*$/i.test(cmd.trim())
-    && !/kill\s+(?:-\S+\s+)?(\d+)\s+.*(not found|done)/i.test(cmd)
+    if (/^kill\s+(?:-\S+\s+)?\d+\s*$/i.test(seg.trim())) continue
+    if (/kill\s+(?:-\S+\s+)?(\d+)\s+.*(not found|done)/i.test(seg)) continue
+    if (DANGEROUS_KILL_VERB.test(seg)) return true
+  }
+  return false
 }
 
 /**
