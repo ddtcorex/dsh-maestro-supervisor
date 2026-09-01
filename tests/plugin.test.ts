@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, inject } from '../src/host/plugin.js'
+import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, createSessionHealthRpcHandler, inject } from '../src/host/plugin.js'
 
 function makeCtx(overrides: Record<string, any> = {}) {
   const logs: string[] = []
@@ -376,12 +376,53 @@ describe('apply', () => {
     expect(resume).toHaveBeenCalledWith(ctx, ['proj/session-a'])
   })
 
-  it('registers the RPC handler exactly once on the corrected channel name', () => {
+  it('registers each RPC handler exactly once on host-valid channel names', () => {
     const ctx = makeCtxWithEffect()
     apply(ctx)
-    expect(ctx._rpcHandlers).toHaveLength(1)
-    expect(ctx._rpcHandlers[0].channel).toBe('/dsh-maestro-supervisor-resume')
-    expect(ctx._rpcHandlers[0].channel).toMatch(/^\/[A-Za-z0-9._~-]+$/)
+    const channels = ctx._rpcHandlers.map((r: any) => r.channel)
+    expect(channels).toEqual(expect.arrayContaining([
+      '/dsh-maestro-supervisor-resume',
+      '/dsh-maestro-supervisor-session-health',
+    ]))
+    // Every channel must satisfy the host channel contract (/^\/[A-Za-z0-9._~-]+$/ —
+    // assertChannel rejects inner slashes, so the sibling dash convention applies).
+    for (const ch of channels) expect(ch).toMatch(/^\/[A-Za-z0-9._~-]+$/)
+    for (const r of ctx._rpcHandlers) expect(r.opts).toMatchObject({ authority: 'loopback' })
+  })
+
+  it('routes a loopback session-health request to runSessionHealthCheck with repair on', async () => {
+    const ctx = makeCtx()
+    const run = vi.fn(async () => ({ fixed: 1, quarantined: 0, remaining: 2 }))
+    const handler = createSessionHealthRpcHandler(ctx, { run, config: { sessionLogRoot: '/sessions/root' } })
+
+    await expect(handler('scan', {}, new AbortController().signal))
+      .resolves.toEqual({ ok: true, value: { fixed: 1, quarantined: 0, remaining: 2 } })
+    expect(run).toHaveBeenCalledWith('/sessions/root', { repair: true, quarantine: false })
+  })
+
+  it('prefers payload.root over config.sessionLogRoot for the session-health root', async () => {
+    const ctx = makeCtx()
+    const run = vi.fn(async () => ({ fixed: 0, quarantined: 0, remaining: 0 }))
+    const handler = createSessionHealthRpcHandler(ctx, { run, config: { sessionLogRoot: '/cfg/root' } })
+
+    await handler('scan', { root: '/payload/root' }, new AbortController().signal)
+    expect(run).toHaveBeenCalledWith('/payload/root', { repair: true, quarantine: false })
+  })
+
+  it('reports a failed session-health scan as an error envelope instead of throwing', async () => {
+    const ctx = makeCtx()
+    const run = vi.fn(async () => { throw new Error('scan boom') })
+    const handler = createSessionHealthRpcHandler(ctx, { run })
+
+    await expect(handler('scan', {}, new AbortController().signal))
+      .resolves.toEqual({ ok: false, error: { code: 'session-health-failed', message: 'scan boom' } })
+  })
+
+  it('registers the maestro_session_health host tool through apply() wiring', () => {
+    const registered: any[] = []
+    const ctx = makeCtxWithEffect({ tools: { register: (d: any) => { registered.push(d); return () => {} } } })
+    apply(ctx)
+    expect(registered.some(t => t.name === 'maestro_session_health')).toBe(true)
   })
 
   it('does not throw when ctx.connection.rpc.handle itself throws', () => {

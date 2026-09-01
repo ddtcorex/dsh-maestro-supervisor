@@ -16,6 +16,7 @@ import type { RestartIntent } from './intents.js'
 import { makeSkillProvider } from './skill-provider.js'
 import { registerRestartTool } from './restart-tool.js'
 import { makePreExecuteGuard } from './self-kill-guard.js'
+import { runSessionHealthCheck } from './session-health.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -24,6 +25,7 @@ export const inject = ['sessions', 'agents', 'connection', 'tools', 'skills'] as
 export interface SupervisorPluginConfig {
   autoResumeWithin?: number | string // in MINUTES if number, or "5m"/"30s"/"1h" string
   autoResumeEnabled?: boolean
+  sessionLogRoot?: string // session-log dir for the session-health scan (env SESSIONS_ROOT wins)
 }
 
 function parseDuration(s: string): number | undefined {
@@ -283,6 +285,109 @@ export function createResumeRpcHandler(
   }
 }
 
+/**
+ * Session-log root resolution shared with the safe-restart pre-flight script
+ * (skills/dsh-safe-restart/scripts/restart-dsh-web.sh): SESSIONS_ROOT wins,
+ * else DSH_HOME/sessions, else ~/.dsh/sessions. Kept in lockstep with the
+ * shell derivation so the RPC/tool and the pre-flight always scan the same
+ * store.
+ */
+function defaultSessionsRoot(): string {
+  if (typeof process.env.SESSIONS_ROOT === 'string' && process.env.SESSIONS_ROOT) return process.env.SESSIONS_ROOT
+  return path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions')
+}
+
+/** Extract a non-empty payload.root, else the resolved default session root. */
+function resolveHealthRoot(payload: unknown, config?: SupervisorPluginConfig): string {
+  const root = (payload as any)?.root
+  if (typeof root === 'string' && root) return root
+  return config?.sessionLogRoot ?? defaultSessionsRoot()
+}
+
+/**
+ * Loopback RPC handler for /dsh-maestro-supervisor-session-health. Runs the
+ * A1 session-log health check over the resolved root with repair on and
+ * quarantine off (mirrors the safe-restart pre-flight — single-frame logs get
+ * re-encoded, corrupt logs stay in place and are only counted). Same
+ * `{ ok, value | error }` envelope shape as the resume handler.
+ */
+export function createSessionHealthRpcHandler(
+  ctx: any,
+  deps: { run?: typeof runSessionHealthCheck; config?: SupervisorPluginConfig } = {},
+) {
+  const run = deps.run ?? runSessionHealthCheck
+  const config = deps.config ?? (ctx as any).config
+  return async (_endpoint: string, payload: unknown, _signal: AbortSignal) => {
+    try {
+      return { ok: true, value: await run(resolveHealthRoot(payload, config), { repair: true, quarantine: false }) }
+    } catch (e: any) {
+      return { ok: false, error: { code: 'session-health-failed', message: e?.message ?? String(e) } }
+    }
+  }
+}
+
+/** dsh.tools definition for the maestro_session_health host tool. */
+function makeSessionHealthToolDef(config: SupervisorPluginConfig) {
+  return {
+    name: 'maestro_session_health',
+    description:
+      'Scan session logs under the operator DSH home sessions dir and report unhealthy shapes (single-frame whole logs, corrupt first frames). ' +
+      'Single-frame logs are re-encoded into the canonical multi-frame form (with a backup); corrupt logs are only counted unless quarantine is enabled. ' +
+      'Safe to run before or after a dsh web restart.',
+    parameters: {
+      type: 'object',
+      properties: {
+        root: { type: 'string', description: 'Session-log root to scan; defaults to the configured/operator DSH home sessions dir' },
+        repair: { type: 'boolean', description: 'Re-encode single-frame whole logs into canonical multi-frame form (default true)' },
+        quarantine: { type: 'boolean', description: 'Move corrupt-first-frame logs aside instead of leaving them in place (default false)' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, counts: { type: 'object' } } },
+      render: (_args: any, value: any) =>
+        [{ type: 'text', text: `fixed=${value?.counts?.fixed ?? 0} quarantined=${value?.counts?.quarantined ?? 0} remaining=${value?.counts?.remaining ?? 0}` }],
+    },
+    execute: async (args: any) => {
+      const counts = await runSessionHealthCheck(resolveHealthRoot(args, config), {
+        repair: args?.repair !== false,
+        quarantine: args?.quarantine === true,
+      })
+      return { ok: true, counts }
+    },
+  }
+}
+
+/**
+ * Register the session-health RPC handle (loopback authority) and the
+ * maestro_session_health host tool. Fail-safe like the other registrations:
+ * any registration error is logged, never thrown, and the returned disposer
+ * unregisters everything that did succeed.
+ */
+export function registerSessionHealthService(ctx: any, config: SupervisorPluginConfig = {}): () => void {
+  const disposers: (() => void)[] = []
+  try {
+    const conn = ctx.connection ?? ctx.get?.('connection')
+    if (conn?.rpc?.handle) {
+      disposers.push(conn.rpc.handle(
+        '/dsh-maestro-supervisor-session-health',
+        createSessionHealthRpcHandler(ctx, { config }),
+        { authority: 'loopback' },
+      ))
+    }
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] session-health RPC registration failed: ${e?.message ?? String(e)}`) } catch {}
+  }
+  try {
+    if (typeof ctx.tools?.register === 'function') {
+      disposers.push(ctx.tools.register(makeSessionHealthToolDef(config)))
+    }
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] session-health tool registration failed: ${e?.message ?? String(e)}`) } catch {}
+  }
+  return () => { for (const d of disposers) { try { d() } catch {} } }
+}
+
 /** Resolve the package-root skills/ dir regardless of module layout. The built
  * host lib is flat (lib/plugin.js → ../skills), but under vitest the same
  * module loads from src/host/ (→ ../../skills). Walking to the nearest
@@ -370,6 +475,12 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
       ctx.effect(() => registerRestartTool(ctx), 'supervisor:restart-tool')
     } catch (e: any) {
       try { ctx.logger?.warn?.(`[supervisor] restart tool effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
+
+    try {
+      ctx.effect(() => registerSessionHealthService(ctx, config), 'supervisor:session-health')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] session-health effect failed: ${e?.message ?? String(e)}`) } catch {}
     }
 
     ctx.effect(() => {

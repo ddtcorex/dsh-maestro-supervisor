@@ -5,6 +5,13 @@
  * by killing the host.
  */
 /**
+ * Remove data spans (quoted strings and heredoc bodies) from a command before
+ * self-kill matching. Text inside quotes or a heredoc is content — an echo,
+ * printf, node -e script or cat <<'EOF' body can legitimately discuss kill
+ * commands without executing one.
+ */
+export declare function stripDataSpans(cmd: string): string;
+/**
  * The dsh web MainThread owns both ports (3000 = gitlab-webhook, 3080 = web).
  * Only listeners on these ports can be dsh web; every other listening process
  * on the host (mysql, sshd, nginx, redis, ...) is explicitly NOT protected.

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import {
   buildKillStalePortsCommand,
   clearPlannedRestart,
@@ -133,5 +134,46 @@ describe('restart-request marker', () => {
     writeRestartRequest({ callerSessionId: 'x' }, -1) // ttl already elapsed
     expect(readRestartRequest()).toBeUndefined()
     clearPlannedRestart()
+  })
+})
+
+const restartScriptPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'skills',
+  'dsh-safe-restart',
+  'scripts',
+  'restart-dsh-web.sh',
+)
+
+describe('restart-dsh-web.sh pre-flight', () => {
+  const script = readFileSync(restartScriptPath, 'utf8')
+
+  it('runs the session-log health scan before the fresh boot when SESSIONS_ROOT exists', () => {
+    const preFlightIdx = script.indexOf('# Pre-flight')
+    expect(preFlightIdx).toBeGreaterThan(-1)
+    // The heal must happen BEFORE any (re)launch of dsh web — while the old
+    // tree is stopped — so a live writer can never race the repair.
+    const startIdx = script.indexOf('systemctl --user start dsh-web.service')
+    expect(startIdx).toBeGreaterThan(-1)
+    expect(preFlightIdx).toBeLessThan(startIdx)
+    const guard = /# Pre-flight[\s\S]*?^\s*fi\s*$/m.exec(script)?.[0] ?? ''
+    expect(guard.length).toBeGreaterThan(0)
+    expect(guard).toMatch(/-n "\$SESSIONS_ROOT"/)
+    expect(guard).toMatch(/-d "\$SESSIONS_ROOT"/)
+    expect(guard).toContain('session-health.js')
+    expect(guard).toContain('runSessionHealthCheck')
+    expect(guard).toContain('repair: true, quarantine: false')
+    expect(guard).toContain('process.env.SESSIONS_ROOT')
+  })
+
+  it('keeps the session-health pre-flight non-fatal so a transient scan error never blocks a restart', () => {
+    const guard = /# Pre-flight[\s\S]*?^\s*fi\s*$/m.exec(script)?.[0] ?? ''
+    expect(guard).toContain('|| true')
+    // The pre-flight itself never aborts the script — the fatal paths
+    // (fail '...' / exit <n>) belong to the gated restart steps, never to an
+    // opportunistic heal.
+    expect(guard).not.toContain("fail '")
+    expect(guard).not.toMatch(/\bexit\s+[0-9]+/)
   })
 })

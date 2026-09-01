@@ -9,6 +9,13 @@ log="${DSH_RESTART_LOG:-/tmp/dsh-web-restart.log}"
 # down poll as a crash unless this marker is fresh, so it never races this
 # script's own kill -> dry-boot -> relaunch sequence with its own rollback.
 marker="${DSH_SUPERVISOR_MARKER:-$HOME/.dsh/.supervisor/planned-restart}"
+# Session-log pre-flight env (see lib/session-health.ts): SESSIONS_ROOT is the
+# operator DSH store's sessions dir (default <dsh home>/sessions) and may be
+# overridden per invocation. PLUGIN_DIR is this package's root, derived from
+# the script's own path — never a hard-coded location.
+dsh_home="${DSH_HOME:-$HOME/.dsh}"
+export SESSIONS_ROOT="${SESSIONS_ROOT:-$dsh_home/sessions}"
+PLUGIN_DIR="${DSH_SUPERVISOR_PLUGIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 confirmed=false
 dry_run=false
 auto_mode=false
@@ -248,6 +255,18 @@ for port in 3000 3080; do
     fail "port $port remains held; refusing to double-boot"
   fi
 done
+
+# Pre-flight: never let a corrupt session log brick the boot
+# Runs only AFTER the old tree is stopped and the ports are free (above) and
+# BEFORE the fresh boot below, so a live writer can never race the repair.
+# Deliberately NON-FATAL (the block's exit status is dropped): a transient
+# scan error must never block a legitimate restart.
+if [ -n "$SESSIONS_ROOT" ] && [ -d "$SESSIONS_ROOT" ]; then
+  node --input-type=module -e "import('${PLUGIN_DIR}/lib/session-health.js').then(async m => {
+    const r = await m.runSessionHealthCheck(process.env.SESSIONS_ROOT, { repair: true, quarantine: false });
+    console.log('[session-health] fixed=' + r.fixed + ' quarantined=' + r.quarantined + ' remaining=' + r.remaining);
+  })" || true
+fi
 
 command -v curl >/dev/null 2>&1 || fail 'required command is unavailable: curl'
 
