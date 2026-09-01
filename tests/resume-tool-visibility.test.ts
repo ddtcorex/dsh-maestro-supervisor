@@ -266,3 +266,91 @@ describe('C2 — resumed-session core-tool-loss mitigation', () => {
     expect(msg).toContain('Do not call bash')
   })
 })
+
+describe('C3 — resume→probe→warn orchestration contract (public resume path)', () => {
+  // C3 pins the plugin-layer orchestration contract (controller ruling): the
+  // resume flow MUST (a) always run the tool-view probe, (b) when bash (or any
+  // CRITICAL_TOOLS name) is missing fire the notifier + inject the tool-
+  // inventory message governed by `resumeCoreToolPolicy`, and (c) surface the
+  // last probe result + parked ids through the maestro_resume_tool_health
+  // RPC/tool. These specs drive the PUBLIC `createResumeRpcHandler` `resume`
+  // endpoint (the same path the loopback RPC uses) with stub seams so a future
+  // config refactor, dependency shuffle, or harness interaction that changes
+  // or drops any leg of this contract fails the suite. deepseek-harness
+  // internals (scope layers) are intentionally NOT depended on from this
+  // plugin — the stubs only model the split the harness exposes (global view
+  // always has every tool; the resumed session's SCOPED view may not).
+  beforeEach(() => {
+    resetResumeToolHealthState()
+  })
+
+  it('resumes → probes → warns + injects inventory on bash loss; default warn policy parks nothing', async () => {
+    const notify = vi.fn(async () => {})
+    const injected: { sid: string; content: string }[] = []
+    const injectSessionMessage = vi.fn((sid: string, content: string) => { injected.push({ sid, content }) })
+    const followup = vi.fn()
+    const tools = scopedTools({ read: {} }) // resumed scope hides bash
+    const ctx = makeCtx({ agents: { get: () => ({ followup }) }, tools })
+
+    // Drive the public resume RPC endpoint — the mitigation runs inside the
+    // real resumeInterrupted (notify + injectSessionMessage seams only).
+    const handler = createResumeRpcHandler(ctx, { notify, injectSessionMessage })
+    const res = await handler('resume', { ids: ['proj/session-c3-1'] }, new AbortController().signal)
+    expect(res).toEqual({ ok: true, value: { resumed: ['proj/session-c3-1'] } })
+
+    // (a) always probe → warn fired with the lost core-tool name.
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0][0]).toContain('[bash]')
+    expect(notify.mock.calls[0][0]).toContain('reopen session if it persists')
+    expect(notify.mock.calls[0][0]).not.toContain('manual reopen required')
+
+    // (b) tool-inventory message injected into the session, scoped to what's
+    //     actually available (never the global view).
+    expect(injectSessionMessage).toHaveBeenCalledTimes(1)
+    expect(injected[0].sid).toBe('session-c3-1')
+    expect(injected[0].content).toContain('bash tool is unavailable')
+    expect(injected[0].content).toContain('Available tools: read')
+    expect(injected[0].content).toContain('Do not call bash')
+
+    // (c) default 'warn' policy → the session is NOT parked.
+    expect(snapshotResumeToolHealth(ctx).parked).toEqual([])
+  })
+
+  it('health RPC surfaces lastResumeProbe + parked after the public resume path', async () => {
+    const notify = vi.fn(async () => {})
+    const injectSessionMessage = vi.fn()
+    const followup = vi.fn()
+    const tools = scopedTools({ read: {} })
+    const ctx = makeCtx({ agents: { get: () => ({ followup }) }, tools })
+
+    await createResumeRpcHandler(ctx, { notify, injectSessionMessage })(
+      'resume',
+      { ids: ['proj/session-c3-2'] },
+      new AbortController().signal,
+    )
+
+    const healthHandler = createResumeToolHealthRpcHandler(ctx)
+    const res = await healthHandler('health', {}, new AbortController().signal)
+    expect(res.ok).toBe(true)
+    expect(res.value.lastResumeProbe).toEqual({ missing: ['bash'], visible: 1 })
+    expect(res.value.parked).toEqual([])
+  })
+
+  it('probe disabled (injected seam missing:[]) → no warn, no injection, nothing parked', async () => {
+    const notify = vi.fn(async () => {})
+    const injectSessionMessage = vi.fn()
+    const followup = vi.fn()
+    const tools = scopedTools({ read: {} }) // would hide bash, but the probe seam reports nothing missing
+    const ctx = makeCtx({ agents: { get: () => ({ followup }) }, tools })
+
+    const resumed = await resumeInterrupted(ctx, ['proj/session-c3-3'], {
+      notify,
+      injectSessionMessage,
+      probeToolView: vi.fn(() => ({ missing: [] as string[], visible: 0 })),
+    })
+    expect(resumed).toEqual(['proj/session-c3-3'])
+    expect(notify).not.toHaveBeenCalled()
+    expect(injectSessionMessage).not.toHaveBeenCalled()
+    expect(snapshotResumeToolHealth(ctx).parked).toEqual([])
+  })
+})
