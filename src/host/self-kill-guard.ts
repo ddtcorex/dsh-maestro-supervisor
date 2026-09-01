@@ -37,7 +37,9 @@ export function stripDataSpans(cmd: string): string {
     // heredoc FIRST: the `<<'EOF'` delimiter quotes would otherwise be eaten by
     // the generic quote-strip below and the body would survive as unquoted text
     out = out.replace(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?[^\r\n]*\r?\n[\s\S]*?^\1\s*$/gm, ' ')
-    out = out.replace(/"[^"]*"/g, ' ').replace(/'[^']*'/g, ' ')
+    // quote spans respect backslash escapes (`\"` inside a double-quoted
+    // node -e body is content, not a delimiter) so nested literals stay stripped
+    out = out.replace(/"(?:[^"\\]|\\.)*"/g, ' ').replace(/'(?:[^'\\]|\\.)*'/g, ' ')
   }
   return out
 }

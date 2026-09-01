@@ -169,6 +169,10 @@ describe('self-kill guard: kill-family words as DATA, not commands (false-positi
     expect(isSelfKillCommand('node -e "console.log(\'pkill -f chrome\')"', [848894])).toBe(false)
     expect(isSelfKillCommand('node --input-type=module -e "import x from \'./lib\'; x()"', [848894])).toBe(false)
   })
+  it('allows escaped-quote nesting (live probe case: node -e with inner quoted literals)', () => {
+    expect(isSelfKillCommand('node -e "console.log(\'echo \\\"pkill -f dsh web\\\"\')"', [848894])).toBe(false)
+    expect(isSelfKillCommand('node -e "run(\'killall dsh\')"', [848894])).toBe(false)
+  })
   it('allows heredoc bodies that mention kill-family commands', () => {
     expect(isSelfKillCommand("cat <<'EOF'\nrun pkill -f dsh web\nand killall -9 some service\ndone\nEOF\n", [848894])).toBe(false)
   })
