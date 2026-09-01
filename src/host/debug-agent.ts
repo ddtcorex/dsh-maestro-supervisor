@@ -3,12 +3,10 @@ export interface DebugAgentOpts {
   health: { error?: string; httpCode?: number }
   cooldownMs?: number
   // injectable deps for testability (defaults to real impl)
-  fetchLLM?: (prompt: string) => Promise<string>
   exec?: (cmd: string, opts?: any) => string
   readFile?: (path: string) => string
   writeFile?: (path: string, content: string) => void
   dryBoot?: () => Promise<boolean>
-  getCredentials?: () => Promise<string | null>
 }
 
 let lastRun = 0
@@ -31,21 +29,15 @@ export async function runDebugAgent(opts: DebugAgentOpts): Promise<{ fixed: bool
   const readFile = opts.readFile ?? defaultReadFile
   const writeFile = opts.writeFile ?? defaultWriteFile
   const dryBoot = opts.dryBoot ?? defaultDryBoot
-  const fetchLLM = opts.fetchLLM ?? defaultFetchLLM
 
-  // Gather context
-  let report = ''
-  try { report = readFile(opts.reportPath) } catch {}
   const err = opts.health.error ?? ''
-  let gitDiff = ''
-  try { gitDiff = exec('git diff --stat 2>&1 | head -30', { timeout: 5000 }) } catch { gitDiff = '' }
 
-  // Deterministic auto-fix for known patterns before LLM
+  // Deterministic auto-fix for known patterns
   try {
     await autoFixKnownPatterns(err, exec, readFile, writeFile)
   } catch {}
 
-  // Phase 1: reproduce — dryBoot check (if transient, already fixed)
+  // Reproduce — dryBoot check (if transient, already fixed)
   try {
     const ok = await dryBoot()
     if (ok) {
@@ -53,33 +45,8 @@ export async function runDebugAgent(opts: DebugAgentOpts): Promise<{ fixed: bool
     }
   } catch {}
 
-  // Phase 2 & 3: LLM systematic-debugging (only if dryBoot failed)
-  const prompt = buildPrompt({ report, err, gitDiff, reportPath: opts.reportPath })
-  try {
-    const llmResponse = await fetchLLM(prompt)
-    // Try to apply LLM-suggested fix if it contains file+content
-    const applied = tryApplyLLMFix(llmResponse, writeFile, exec)
-    // Verify after apply
-    try { exec('pnpm verify --silent 2>&1 | head -20', { timeout: 15000 }) } catch {}
-    const ok2 = await dryBoot().catch(() => false)
-    if (ok2) {
-      const summary = extractSummary(llmResponse)
-      return { fixed: true, reason: `LLM fixed (attempt ${attempts}): ${summary}` }
-    }
-    // LLM responded but still not fixed
-    if (applied) {
-      return { fixed: false, reason: `LLM applied fix but dry-boot still fails (attempt ${attempts}) — ${extractSummary(llmResponse).slice(0, 120)}` }
-    }
-  } catch (e: any) {
-    const msg = e?.message ?? String(e)
-    // If LLM unavailable, fall through to manual reason
-    if (msg.includes('no api key') || msg.includes('LLM')) {
-      return { fixed: false, reason: `would debug ${opts.reportPath} (attempt ${attempts}) — LLM not configured: ${msg}` }
-    }
-    return { fixed: false, reason: `would debug ${opts.reportPath} (attempt ${attempts}) — LLM error: ${msg}` }
-  }
-
-  return { fixed: false, reason: `would debug ${opts.reportPath} (attempt ${attempts}) — LLM not wired, manual fix needed` }
+  // No LLM auto-debug: deterministic auto-fix + dry-boot already tried — hand off to a human.
+  return { fixed: false, reason: `would debug ${opts.reportPath} (attempt ${attempts}) — manual fix needed (deterministic auto-fix + dry-boot already tried)` }
 }
 
 async function autoFixKnownPatterns(err: string, exec: (c: string, o?: any) => string, readFile: (p: string) => string, writeFile: (p: string, c: string) => void): Promise<void> {
@@ -121,68 +88,6 @@ async function autoFixKnownPatterns(err: string, exec: (c: string, o?: any) => s
     try { exec('ls ~/.dsh/maestro/*.bak 2>&1 | head -5', { timeout: 5000 }) } catch {}
     return
   }
-}
-
-function buildPrompt(ctx: { report: string; err: string; gitDiff: string; reportPath: string }): string {
-  return [
-    'systematic-debugging — DSH Web crash auto-fix',
-    '',
-    'Phase 1: Root Cause Investigation. Read error carefully, reproduce, check recent changes.',
-    `Report: ${ctx.reportPath}`,
-    `Health error: ${ctx.err}`,
-    `Report snippet: ${ctx.report.slice(0, 2000)}`,
-    `Git diff: ${ctx.gitDiff.slice(0, 1500)}`,
-    '',
-    'Task: Propose minimal single-file fix. Respond as JSON: {"analysis":"...","file":"<abs path>","content":"<full file content or patch>"}',
-    'If unsure, explain analysis and suggest manual step.',
-  ].join('\n')
-}
-
-function tryApplyLLMFix(response: string, writeFile: (p: string, c: string) => void, exec: (c: string, o?: any) => string): boolean {
-  try {
-    // First try to extract inner JSON if response is OpenAI wrapper (choices) — unwrap message.content
-    let candidate = response
-    try {
-      const outer = JSON.parse(response)
-      if (outer.choices?.[0]?.message?.content) candidate = outer.choices[0].message.content
-      else if (outer.output) {
-        // openai-responses wrapper: find message with output_text
-        const msg = outer.output.find((o: any) => o.type === 'message' && o.content?.[0]?.text)
-        if (msg) candidate = msg.content[0].text
-      }
-    } catch {}
-    // Also handle case where response is already the inner JSON string or contains it
-    const jsonMatch = candidate.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return false
-    const obj = JSON.parse(jsonMatch[0])
-    if (obj.file && obj.content) {
-      writeFile(obj.file, obj.content)
-      // try to verify after write
-      try { exec(`pnpm --dir ${obj.file.split('/packages/')[0] || '.'} verify --silent 2>&1 | head -10`, { timeout: 15000 }) } catch {}
-      return true
-    }
-  } catch {}
-  return false
-}
-
-function extractSummary(response: string): string {
-  try {
-    let candidate = response
-    try {
-      const outer = JSON.parse(response)
-      if (outer.choices?.[0]?.message?.content) candidate = outer.choices[0].message.content
-      else if (outer.output) {
-        const msg = outer.output.find((o: any) => o.type === 'message' && o.content?.[0]?.text)
-        if (msg) candidate = msg.content[0].text
-      }
-    } catch {}
-    const m = candidate.match(/\{[\s\S]*\}/)
-    if (m) {
-      const obj = JSON.parse(m[0])
-      if (obj.analysis) return obj.analysis.slice(0, 200)
-    }
-  } catch {}
-  return response.slice(0, 200).replace(/\n/g, ' ')
 }
 
 // ---------- defaults ----------
@@ -232,213 +137,6 @@ async function defaultDryBoot(): Promise<boolean> {
     try { execSync(buildKillStalePortsCommand([port]), { timeout: 5000, stdio: 'pipe' } as any) } catch {}
     if (tmp) { try { execSync(`rm -rf ${tmp}`) } catch {} }
   }
-}
-
-async function defaultFetchLLM(prompt: string): Promise<string> {
-  const cfg = await resolveLLMConfig()
-  if (!cfg.key) throw new Error('no api key — set DEEPSEEK_API_KEY / OMNI_ROUTE_API_KEY / OPENCODE_GO_API_KEY / OPENAI_API_KEY or ~/.dsh/.credentials.yaml or AI_API_KEY')
-  // Build URLs from cfg.url (may be base or full endpoint). Support any provider/model — try completions then responses.
-  const base = cfg.url.replace(/\/v1\/(chat\/completions|responses).*/, '/v1').replace(/\/$/, '')
-  const completionsUrl = cfg.url.includes('/chat/completions') ? cfg.url : (cfg.url.includes('/responses') ? cfg.url.replace('/responses', '/chat/completions') : `${base}/chat/completions`)
-  const responsesUrl = cfg.url.includes('/responses') ? cfg.url : `${base}/responses`
-
-  // Try openai-completions first (works for deepseek-v4, openai, openrouter, omni-route completions)
-  try {
-    const res = await fetch(completionsUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.key}` },
-      body: JSON.stringify({
-        model: cfg.model,
-        temperature: 0.2,
-        ...(cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort, reasoningEffort: cfg.reasoningEffort } : {}),
-        messages: [
-          { role: 'system', content: 'You are a systematic-debugging agent for DSH Web resilience. Follow the 4 phases: root cause, pattern analysis, hypothesis, implementation. Always propose minimal single-file fix.' },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    })
-    if (res.ok) {
-      const j: any = await res.json()
-      const content = j.choices?.[0]?.message?.content
-      if (content) return content
-      // Some providers return different shape but still ok — return stringified
-      return JSON.stringify(j)
-    }
-    // If completions fails, fall through to responses for providers that use openai-responses (e.g. opencode-go muse-spark)
-    const txt = await res.text().catch(() => '')
-    // Only fall through for 4xx/5xx that likely indicate wrong API — otherwise throw
-    if (res.status >= 400 && res.status < 600) {
-      // try responses as fallback for any provider/model
-    } else {
-      throw new Error(`LLM ${res.status} ${txt}`)
-    }
-  } catch (e: any) {
-    // Network error — if completionsUrl was tried and failed, try responses as generic fallback
-    if (!e.message?.includes('LLM ')) {
-      // will try responses below
-    } else {
-      throw e
-    }
-  }
-
-  // Fallback: try openai-responses (used by opencode-go muse-spark, minimax-m3, qwen3.7, etc.) — works for any provider that supports it
-  const res2 = await fetch(responsesUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.key}` },
-    body: JSON.stringify({
-      model: cfg.model,
-      input: [
-        { role: 'system', content: 'You are a systematic-debugging agent for DSH Web resilience. Follow the 4 phases: root cause, pattern analysis, hypothesis, implementation. Always propose minimal single-file fix.' },
-        { role: 'user', content: prompt },
-      ],
-      max_output_tokens: 4000,
-      ...(cfg.reasoningEffort ? { reasoning: { effort: cfg.reasoningEffort } } : { reasoning: { effort: 'low' } }),
-    }),
-  })
-  if (!res2.ok) throw new Error(`LLM ${res2.status} ${await res2.text().catch(() => '')}`)
-  const j2: any = await res2.json()
-  // Extract text from responses output (opencode-go) or completions fallback
-  if (j2.output) {
-    const msg = j2.output.find((o: any) => o.type === 'message' && o.content?.[0]?.text)
-    if (msg) return msg.content[0].text
-  }
-  return j2.choices?.[0]?.message?.content ?? JSON.stringify(j2)
-}
-
-interface LLMConfig { key: string | null; url: string; model: string; reasoningEffort?: string }
-
-async function resolveLLMConfig(): Promise<LLMConfig> {
-  // Custom AI provider: env overrides, then settings.yaml (llm-pi-ai providers, DeepSeek suggested setup), then settings.json, then defaults
-  // Supports any provider/model the user configures via DeepSeek harness (opencode-go, omni-route, deepseek, openrouter, etc.)
-  let url =
-    process.env.AI_API_URL ??
-    process.env.DEAPSEEK_API_URL ??
-    process.env.DEEPSEEK_API_URL ??
-    process.env.OPENAI_API_BASE ??
-    process.env.OMNI_ROUTE_API_URL ??
-    process.env.OPENCODE_API_URL ??
-    null
-
-  // Model: AI_MODEL / DEEPSEEK_MODEL / settings.json domains.supervisor.model -> domains.review.model / default
-  // Supervisor has its own picker; falls back to review model for backward compat, then DSH default.
-  let model = process.env.AI_MODEL ?? process.env.DEEPSEEK_MODEL ?? process.env.OPENAI_MODEL ?? null
-  // reasoningEffort: env first, then supervisor -> review, then settings.yaml fallback
-  let reasoningEffort: string | undefined = (process.env.AI_REASONING_EFFORT ?? process.env.REASONING_EFFORT ?? null) as string | null | undefined ?? undefined
-  if (!model || !reasoningEffort) {
-    try {
-      const { readFileSync } = await import('node:fs')
-      const { homedir } = await import('node:os')
-      const settingsPath = `${homedir()}/.dsh/maestro/settings.json`
-      const raw = readFileSync(settingsPath, 'utf-8')
-      const j = JSON.parse(raw)
-      // Prefer supervisor model, fall back to review model (so old installs keep working)
-      if (!model) {
-        const sup = j?.domains?.supervisor?.model?.model ?? j?.domains?.supervisor?.model
-        const rev = j?.domains?.review?.model?.model ?? j?.domains?.review?.model
-        let m: unknown = null
-        if (typeof sup === 'string') m = sup
-        else if (sup?.model && typeof sup.model === 'string') m = sup.model
-        else if (typeof rev === 'string') m = rev
-        else if (rev?.model && typeof rev.model === 'string') m = rev.model
-        if (typeof m === 'string' && m.trim() !== '') model = m as string
-      }
-      if (!reasoningEffort) {
-        // config-lib validator: model is {provider, model, reasoningEffort?} inside domains.supervisor.model / domains.review.model
-        // Support both nested object and flat legacy fallback for future compat
-        const supObj = j?.domains?.supervisor?.model
-        const revObj = j?.domains?.review?.model
-        const supEff = typeof supObj === 'object' && supObj !== null ? (supObj as any).reasoningEffort : undefined
-        const supFlat = (j?.domains?.supervisor as any)?.reasoningEffort
-        const revEff = typeof revObj === 'object' && revObj !== null ? (revObj as any).reasoningEffort : undefined
-        const revFlat = (j?.domains?.review as any)?.reasoningEffort
-        const candidate = supEff ?? supFlat ?? revEff ?? revFlat
-        if (typeof candidate === 'string' && candidate.trim() !== '') reasoningEffort = candidate.trim()
-      }
-    } catch {}
-  }
-  if (!model) model = 'deepseek-chat'
-  // Also try settings.yaml for reasoningEffort if still missing (e.g., llm-pi-ai default reasoning)
-  if (!reasoningEffort) {
-    try {
-      const { readFileSync } = await import('node:fs')
-      const { homedir } = await import('node:os')
-      const yamlPath = `${homedir()}/.dsh/settings.yaml`
-      const yaml = readFileSync(yamlPath, 'utf-8')
-      // Look for reasoningEffort near the model id in provider blocks (future-proof; currently not in yaml)
-      const re = new RegExp(`id:\\s*${model}[\\s\\S]{0,200}reasoningEffort:\\s*(\\S+)`, 'm')
-      const m = yaml.match(re)
-      if (m) {
-        const v = m[1].trim().replace(/^["']|["']$/g, '')
-        if (v) reasoningEffort = v
-      }
-    } catch {}
-  }
-
-  // If url not set via env, try to resolve from ~/.dsh/settings.yaml llm-pi-ai providers (DeepSeek suggested setup)
-  if (!url) {
-    try {
-      const { readFileSync } = await import('node:fs')
-      const { homedir } = await import('node:os')
-      const yamlPath = `${homedir()}/.dsh/settings.yaml`
-      const yaml = readFileSync(yamlPath, 'utf-8')
-      // Find provider that owns the current model (e.g. muse-spark -> opencode-go)
-      // settings.yaml structure: llm-pi-ai: providers: <provider>: { baseURL, models: [{id}] }
-      // Use regex to extract provider blocks
-      const providerBlocks = [...yaml.matchAll(/^ {4}(\S+):\s*\n([\s\S]*?)(?=^ {4}\S+:|\n\S)/gm)]
-      for (const [, provider, block] of providerBlocks) {
-        if (block.includes(`id: ${model}`)) {
-          const m = block.match(/baseURL:\s*(\S+)/)
-          if (m) { url = m[1].trim(); break }
-        }
-      }
-      // Also check agent-default-model provider
-      if (!url) {
-        const defM = yaml.match(/agent-default-model:\s*\n\s*provider:\s*(\S+)/)
-        if (defM) {
-          const prov = defM[1].trim()
-          const provBlock = yaml.match(new RegExp(`^ {4}${prov}:\\s*\\n([\\s\\S]*?)(?=^ {4}\\S+:|\\n\\S)`, 'm'))
-          if (provBlock) {
-            const m = provBlock[1].match(/baseURL:\s*(\S+)/)
-            if (m) url = m[1].trim()
-          }
-        }
-      }
-    } catch {}
-  }
-  if (!url) url = 'https://api.deepseek.com/v1/chat/completions'
-
-  // Key: AI_API_KEY / DEEPSEEK_API_KEY / OMNI_ROUTE_API_KEY / OPENCODE_GO_API_KEY / OPENAI_API_KEY
-  let key: string | null =
-    process.env.AI_API_KEY ??
-    process.env.DEEPSEEK_API_KEY ??
-    process.env.OMNI_ROUTE_API_KEY ??
-    process.env.OPENCODE_GO_API_KEY ??
-    process.env.OPENAI_API_KEY ??
-    null
-  if (!key) {
-    try {
-      const { readFileSync } = await import('node:fs')
-      const { homedir } = await import('node:os')
-      const p = `${homedir()}/.dsh/.credentials.yaml`
-      const content = readFileSync(p, 'utf-8')
-      const keys = ['AI_API_KEY', 'DEEPSEEK_API_KEY', 'OMNI_ROUTE_API_KEY', 'OPENCODE_GO_API_KEY', 'OPENAI_API_KEY'] as const
-      for (const k of keys) {
-        const m = content.match(new RegExp(`${k}:\\s*["']?([^"'\\n]+)["']?`))
-        if (m) { key = m[1].trim(); break }
-      }
-    } catch {}
-  }
-  // If url is base without /v1/chat/completions, append
-  let finalUrl = url
-  if (!url.includes('/v1/') && !url.includes('/chat/completions')) {
-    finalUrl = url.replace(/\/$/, '') + '/v1/chat/completions'
-  }
-  return { key, url: finalUrl, model, ...(reasoningEffort ? { reasoningEffort } : {}) }
-}
-
-async function resolveApiKey(): Promise<string | null> {
-  const cfg = await resolveLLMConfig()
-  return cfg.key
 }
 
 export function _resetDebugAgentForTest() {

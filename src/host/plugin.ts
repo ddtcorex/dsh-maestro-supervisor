@@ -16,6 +16,14 @@ import type { RestartIntent } from './intents.js'
 import { makeSkillProvider } from './skill-provider.js'
 import { registerRestartTool } from './restart-tool.js'
 import { makePreExecuteGuard } from './self-kill-guard.js'
+import { runSessionHealthCheck } from './session-health.js'
+import {
+  warnCoreToolLoss,
+  recordResumedSession,
+  recordResumeProbe,
+  registerResumeToolHealthService,
+} from './resume-tools.js'
+export * from './resume-tools.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -24,7 +32,22 @@ export const inject = ['sessions', 'agents', 'connection', 'tools', 'skills'] as
 export interface SupervisorPluginConfig {
   autoResumeWithin?: number | string // in MINUTES if number, or "5m"/"30s"/"1h" string
   autoResumeEnabled?: boolean
+  sessionLogRoot?: string // session-log dir for the session-health scan (env SESSIONS_ROOT wins)
+  resumeCoreToolPolicy?: ResumeCoreToolPolicy // C2 — see type below
 }
+
+/**
+ * C2 — mitigation policy when a resumed session's post-resume probe (C1)
+ * reports a core tool (bash) missing from its SCOPED tool view:
+ *  - 'warn': notify the operator once + inject a "System:" inventory message
+ *    into the session telling the model which tools it CAN still call
+ *    (default — the loss is real, but the session may still be usable).
+ *  - 'park': additionally record the session id in the park set (exposed via
+ *    maestro_resume_tool_health / /dsh-maestro-supervisor-resume-tool-health)
+ *    and flag the notify with "(manual reopen required)" — the operator must
+ *    reopen the session fresh because the core-tool surface is not guaranteed.
+ */
+export type ResumeCoreToolPolicy = 'warn' | 'park'
 
 function parseDuration(s: string): number | undefined {
   if (!s) return undefined
@@ -76,6 +99,40 @@ function getAutoResumeEnabled(config?: SupervisorPluginConfig): boolean {
   return true
 }
 
+/**
+ * C2 — resolve the mitigation policy with exactly the same precedence chain as
+ * getAutoResumeEnabled: (1) the Cordis-supplied plugin config (cordis.patch.yml
+ * `config:` block / whatever apply() receives — highest precedence), (2) env
+ * DSH_SUPERVISOR_RESUME_CORE_TOOL_POLICY, (3) ~/.dsh/.supervisor/config.json,
+ * (4) ~/.dsh/maestro/settings.json (domains.supervisor.resumeCoreToolPolicy),
+ * (5) 'warn'. Any other value falls through to the default 'warn'.
+ */
+function getResumeCoreToolPolicy(config?: SupervisorPluginConfig): ResumeCoreToolPolicy {
+  if (config?.resumeCoreToolPolicy === 'warn' || config?.resumeCoreToolPolicy === 'park') {
+    return config.resumeCoreToolPolicy
+  }
+  const env = process.env.DSH_SUPERVISOR_RESUME_CORE_TOOL_POLICY
+  if (env) {
+    const v = env.trim().toLowerCase()
+    if (v === 'warn' || v === 'park') return v
+  }
+  try {
+    const cfgPath = path.join(os.homedir(), '.dsh/.supervisor/config.json')
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'))
+      const raw = (cfg as any).resumeCoreToolPolicy
+      if (raw === 'warn' || raw === 'park') return raw
+    }
+    const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+    if (fs.existsSync(maestroPath)) {
+      const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
+      const raw = j?.domains?.supervisor?.resumeCoreToolPolicy ?? j?.supervisor?.resumeCoreToolPolicy
+      if (raw === 'warn' || raw === 'park') return raw
+    }
+  } catch {}
+  return 'warn'
+}
+
 function getResumeWithinMs(config?: SupervisorPluginConfig): number {
   // Same precedence rule as getAutoResumeEnabled: explicit config wins first.
   if (config?.autoResumeWithin !== undefined) {
@@ -118,6 +175,65 @@ function getResumeWithinMs(config?: SupervisorPluginConfig): number {
   return 5 * 60 * 1000
 }
 
+/**
+ * Core tools that must be visible on a resumed session. Part C targets the
+ * post-restart bash loss (`Error: unknown tool "bash"`); extend this list to
+ * widen the probe (e.g. 'cordis_inspect_query').
+ */
+export const CRITICAL_TOOLS = ['bash'] as const
+
+/** Minimal ToolRegistry surface the resume tool-view probe reads. */
+export interface ToolsLike {
+  get?(name: string, scope?: unknown): unknown
+  schemas?(scope?: unknown): { name?: string }[]
+}
+
+/** Caller-visible result of the post-resume tool-view probe. */
+export interface ToolViewProbe {
+  missing: string[]
+  visible: number
+}
+
+export type ToolViewProbeFn = (
+  tools: ToolsLike | undefined,
+  scope: string,
+  logger?: { info?: (msg: string) => void },
+) => ToolViewProbe
+
+export type ToolScopeResolver = (ctx: any, sessionId: string) => string
+
+/** Default: the resumed agent's tool scope is its top-level session id. */
+export const defaultResolveToolScope: ToolScopeResolver = (_ctx, sessionId) => sessionId
+
+/**
+ * Snapshot one session's visible tool view for the journal: which CRITICAL_TOOLS
+ * are missing from the SCOPED registry (not the global view) and how many tools
+ * are visible. When the tools service is absent or lacks `get`, the probe is
+ * skipped and reports no missing tools. The log line is the Part D trigger —
+ * `bash=false` at resume marks the loss the moment it happens.
+ * @param tools - the harness ToolRegistry service, or undefined when unavailable.
+ * @param scope - the session's tool scope (defaults to the top-level session id).
+ * @param logger - optional ctx logger; the probe writes its line when present.
+ */
+export function probeToolView(
+  tools: ToolsLike | undefined,
+  scope: string,
+  logger?: { info?: (msg: string) => void },
+): ToolViewProbe {
+  const probe: ToolViewProbe = { missing: [], visible: 0 }
+  try {
+    const get = tools?.get
+    if (typeof get !== 'function') return probe
+    probe.missing = [...CRITICAL_TOOLS].filter((name) => get(name, scope) === undefined)
+    const schemas = tools?.schemas?.(scope)
+    probe.visible = Array.isArray(schemas) ? schemas.length : 0
+  } catch {}
+  try {
+    logger?.info?.(`[supervisor] resumed ${scope}: bash=${!probe.missing.includes('bash')} visibleTools=${probe.visible} missing=${probe.missing.join(',') || 'none'}`)
+  } catch {}
+  return probe
+}
+
 export async function runAutoResume(
   ctx: any,
   opts: {
@@ -154,7 +270,7 @@ export async function runAutoResume(
       return
     }
     ctx.logger?.info?.(`[supervisor] auto-resume: ${merged.length}/${scanned} interrupted within ${withinMs}ms: ${merged.slice(0, 3).join(', ')}`)
-    await doResume(ctx, merged)
+    await doResume(ctx, merged, { ...(opts?.config !== undefined ? { config: opts.config } : {}) })
   } catch (e: any) {
     try {
       ctx.logger?.warn?.(`[supervisor] auto-resume error: ${e?.message ?? String(e)}`)
@@ -165,10 +281,22 @@ export async function runAutoResume(
 export async function resumeInterrupted(
   ctx: any,
   ids: string[],
-  deps: { readIntent?: (id: string) => RestartIntent | undefined; consumeIntent?: (id: string) => void } = {},
+  deps: {
+    readIntent?: (id: string) => RestartIntent | undefined
+    consumeIntent?: (id: string) => void
+    probeToolView?: ToolViewProbeFn
+    resolveToolScope?: ToolScopeResolver
+    // C2 injectable seams — default to the real notifier + real session push.
+    notify?: (line: string) => Promise<void>
+    injectSessionMessage?: (sessionId: string, content: string) => unknown
+    config?: SupervisorPluginConfig
+  } = {},
 ): Promise<string[]> {
   const doReadIntent = deps.readIntent ?? readIntent
   const doConsumeIntent = deps.consumeIntent ?? consumeIntent
+  const doProbe = deps.probeToolView ?? probeToolView
+  const doResolveToolScope = deps.resolveToolScope ?? defaultResolveToolScope
+  const coreToolPolicy = getResumeCoreToolPolicy(deps.config)
   const resumed: string[] = []
   for (const id of ids) {
     try {
@@ -251,6 +379,27 @@ export async function resumeInterrupted(
       try { if (resumeMessage !== idleMessage) doConsumeIntent(sessionId) } catch {}
       resumed.push(id)
       ctx.logger?.info?.(`[supervisor] auto-resume: sent recovery continue for ${id}`)
+      // C1 observability probe — snapshot the resumed session's SCOPED tool
+      // view at the success point so a post-resume bash loss surfaces in the
+      // journal the moment it happens (Part D reads this line). Defensive:
+      // absent ctx.tools just skips the probe, never fails the resume.
+      // C2 mitigation — when the probe reports a CORE tool lost from the
+      // resumed session's SCOPED view, notify the operator + inject the tool-
+      // inventory System message (park policy additionally parks the id for a
+      // manual reopen). Both record the session as "currently resumed" and
+      // the probe as the freshest observation for maestro_resume_tool_health.
+      try {
+        const probeTools = (ctx.get?.('tools') as any) ?? (ctx as any).tools
+        const probe = doProbe(probeTools, doResolveToolScope(ctx, sessionId), ctx.logger)
+        recordResumedSession(sessionId)
+        if (probe.missing.length) {
+          await warnCoreToolLoss(ctx, sessionId, doResolveToolScope(ctx, sessionId), probe, coreToolPolicy, {
+            notify: deps.notify,
+            injectSessionMessage: deps.injectSessionMessage,
+          })
+        }
+        recordResumeProbe(probe)
+      } catch {}
     } catch (e: any) {
       ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
     }
@@ -260,7 +409,12 @@ export async function resumeInterrupted(
 
 export function createResumeRpcHandler(
   ctx: any,
-  opts: { resumeInterrupted?: typeof resumeInterrupted; config?: SupervisorPluginConfig } = {},
+  opts: {
+    resumeInterrupted?: typeof resumeInterrupted
+    config?: SupervisorPluginConfig
+    notify?: (line: string) => Promise<void>
+    injectSessionMessage?: (sessionId: string, content: string) => unknown
+  } = {},
 ) {
   const resume = opts.resumeInterrupted ?? resumeInterrupted
   return async (endpoint: string, payload: unknown, _signal: AbortSignal) => {
@@ -279,8 +433,119 @@ export function createResumeRpcHandler(
     if (!ids.length) {
       return { ok: false, error: { code: 'bad-request', message: 'resume requires at least one session id' } }
     }
-    return { ok: true, value: { resumed: await resume(ctx, ids) } }
+    // Forward the resume-relevant surface (config so resumeCoreToolPolicy
+    // resolves, plus the C2 injectable seams). Optional keys keep the deps
+    // object minimal — absent opts only yields `{}`.
+    const resumeDeps = {
+      ...(opts.config !== undefined ? { config: opts.config } : {}),
+      ...(opts.notify !== undefined ? { notify: opts.notify } : {}),
+      ...(opts.injectSessionMessage !== undefined ? { injectSessionMessage: opts.injectSessionMessage } : {}),
+    }
+    return { ok: true, value: { resumed: await resume(ctx, ids, resumeDeps) } }
   }
+}
+
+/**
+ * Session-log root resolution shared with the safe-restart pre-flight script
+ * (skills/dsh-safe-restart/scripts/restart-dsh-web.sh): SESSIONS_ROOT wins,
+ * else DSH_HOME/sessions, else ~/.dsh/sessions. Kept in lockstep with the
+ * shell derivation so the RPC/tool and the pre-flight always scan the same
+ * store.
+ */
+function defaultSessionsRoot(): string {
+  if (typeof process.env.SESSIONS_ROOT === 'string' && process.env.SESSIONS_ROOT) return process.env.SESSIONS_ROOT
+  return path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions')
+}
+
+/** Extract a non-empty payload.root, else the resolved default session root. */
+function resolveHealthRoot(payload: unknown, config?: SupervisorPluginConfig): string {
+  const root = (payload as any)?.root
+  if (typeof root === 'string' && root) return root
+  return config?.sessionLogRoot ?? defaultSessionsRoot()
+}
+
+/**
+ * Loopback RPC handler for /dsh-maestro-supervisor-session-health. Runs the
+ * A1 session-log health check over the resolved root with repair on and
+ * quarantine off (mirrors the safe-restart pre-flight — single-frame logs get
+ * re-encoded, corrupt logs stay in place and are only counted). Same
+ * `{ ok, value | error }` envelope shape as the resume handler.
+ */
+export function createSessionHealthRpcHandler(
+  ctx: any,
+  deps: { run?: typeof runSessionHealthCheck; config?: SupervisorPluginConfig } = {},
+) {
+  const run = deps.run ?? runSessionHealthCheck
+  const config = deps.config ?? (ctx as any).config
+  return async (_endpoint: string, payload: unknown, _signal: AbortSignal) => {
+    try {
+      return { ok: true, value: await run(resolveHealthRoot(payload, config), { repair: true, quarantine: false }) }
+    } catch (e: any) {
+      return { ok: false, error: { code: 'session-health-failed', message: e?.message ?? String(e) } }
+    }
+  }
+}
+
+/** dsh.tools definition for the maestro_session_health host tool. */
+function makeSessionHealthToolDef(config: SupervisorPluginConfig) {
+  return {
+    name: 'maestro_session_health',
+    description:
+      'Scan session logs under the operator DSH home sessions dir and report unhealthy shapes (single-frame whole logs, corrupt first frames). ' +
+      'Single-frame logs are re-encoded into the canonical multi-frame form (with a backup); corrupt logs are only counted unless quarantine is enabled. ' +
+      'Safe to run before or after a dsh web restart.',
+    parameters: {
+      type: 'object',
+      properties: {
+        root: { type: 'string', description: 'Session-log root to scan; defaults to the configured/operator DSH home sessions dir' },
+        repair: { type: 'boolean', description: 'Re-encode single-frame whole logs into canonical multi-frame form (default true)' },
+        quarantine: { type: 'boolean', description: 'Move corrupt-first-frame logs aside instead of leaving them in place (default false)' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, counts: { type: 'object' } } },
+      render: (_args: any, value: any) =>
+        [{ type: 'text', text: `fixed=${value?.counts?.fixed ?? 0} quarantined=${value?.counts?.quarantined ?? 0} remaining=${value?.counts?.remaining ?? 0}` }],
+    },
+    execute: async (args: any) => {
+      const counts = await runSessionHealthCheck(resolveHealthRoot(args, config), {
+        repair: args?.repair !== false,
+        quarantine: args?.quarantine === true,
+      })
+      return { ok: true, counts }
+    },
+  }
+}
+
+/**
+ * Register the session-health RPC handle (loopback authority) and the
+ * maestro_session_health host tool. Fail-safe like the other registrations:
+ * any registration error is logged, never thrown, and the returned disposer
+ * unregisters everything that did succeed.
+ */
+export function registerSessionHealthService(ctx: any, config: SupervisorPluginConfig = {}): () => void {
+  const disposers: (() => void)[] = []
+  try {
+    const conn = ctx.connection ?? ctx.get?.('connection')
+    if (conn?.rpc?.handle) {
+      disposers.push(conn.rpc.handle(
+        '/dsh-maestro-supervisor-session-health',
+        createSessionHealthRpcHandler(ctx, { config }),
+        { authority: 'loopback' },
+      ))
+    }
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] session-health RPC registration failed: ${e?.message ?? String(e)}`) } catch {}
+  }
+  try {
+    if (typeof ctx.tools?.register === 'function') {
+      disposers.push(ctx.tools.register(makeSessionHealthToolDef(config)))
+    }
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] session-health tool registration failed: ${e?.message ?? String(e)}`) } catch {}
+  }
+  return () => { for (const d of disposers) { try { d() } catch {} } }
 }
 
 /** Resolve the package-root skills/ dir regardless of module layout. The built
@@ -370,6 +635,18 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
       ctx.effect(() => registerRestartTool(ctx), 'supervisor:restart-tool')
     } catch (e: any) {
       try { ctx.logger?.warn?.(`[supervisor] restart tool effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
+
+    try {
+      ctx.effect(() => registerSessionHealthService(ctx, config), 'supervisor:session-health')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] session-health effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
+
+    try {
+      ctx.effect(() => registerResumeToolHealthService(ctx), 'supervisor:resume-tool-health')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] resume-tool-health effect failed: ${e?.message ?? String(e)}`) } catch {}
     }
 
     ctx.effect(() => {
