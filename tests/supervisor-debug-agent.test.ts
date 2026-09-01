@@ -4,7 +4,7 @@ import { Supervisor } from '../src/host/supervisor.js'
 describe('supervisor — debug-agent LLM integration', () => {
   it('notifies FIXED when debug-agent reports fixed (degraded)', async () => {
     const notify = vi.fn(async () => {})
-    const runDebugAgent = vi.fn(async () => ({ fixed: true, reason: 'LLM fixed: patched allowBuilds' }))
+    const runDebugAgent = vi.fn(async () => ({ fixed: true, reason: 'auto-fix applied allowBuilds' }))
     const s = new Supervisor({
       pollHealth: async () => ({ up: true, degraded: true, httpCode: 200, error: 'allowBuilds missing' }),
       writeLKG: vi.fn(async () => ({ ts: '', manifest: {} as any })),
@@ -47,7 +47,7 @@ describe('supervisor — debug-agent LLM integration', () => {
 
   it('notifies FIXED when debug-agent fixes full crash after rollback', async () => {
     const notify = vi.fn(async () => {})
-    const runDebugAgent = vi.fn(async () => ({ fixed: true, reason: 'LLM fixed after rollback' }))
+    const runDebugAgent = vi.fn(async () => ({ fixed: true, reason: 'auto-fix applied after rollback' }))
     const s = new Supervisor({
       pollHealth: async () => ({ up: false, httpCode: 500, error: 'ERR_MODULE_NOT_FOUND lib' }),
       writeLKG: vi.fn(async () => ({ ts: '', manifest: {} as any })),
