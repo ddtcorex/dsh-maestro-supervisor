@@ -12,7 +12,7 @@ Supervisor for DSH Web resilience — three cooperating layers:
 
 Names by boundary: npm package `@ddtcorex/dsh-maestro-supervisor`; binary `dsh-web-supervisor`; Cordis row `maestro-supervisor`; RPC channel `/dsh-maestro-supervisor-resume` (loopback) and `/dsh-maestro-supervisor-reload` (client). The daemon itself is **not** a Cordis plugin — standalone daemon (Phase 1 Guard & Report of `<workspace-root>/docs/specs/2026-08-27-dsh-web-resilience-design.md`). The host+client plugins are the one deliberate in-tree exception — see `## Conventions`.
 
-Part of the Maestro Harness suite. See spec for Phase 2 (loader isolation) and Phase 3 (autonomous debug agent + Telegram + session resume).
+Part of the Maestro Harness suite. See spec for Phase 2 (loader isolation) and Phase 3 (deterministic debug auto-fix — NO LLM — + Telegram + session resume).
 
 ## Architecture
 
@@ -49,7 +49,9 @@ Part of the Maestro Harness suite. See spec for Phase 2 (loader isolation) and P
 - `src/host/health-poller.ts` — `pollHealth()` with injectable `fetch/psAlive/logTail`; detects `ERR_MODULE_NOT_FOUND` / `assertChannel` / `unhandledRejection` / `EADDRINUSE`
 - `src/host/report.ts` — `writeReport()` → `~/.dsh/.supervisor/reports/report-<ts>.md` (health + git diff + log tail 200)
 - `src/host/notifier.ts` — Telegram bridge via `dsh-maestro-notifier` (swallow errors, never block rollback)
-- `src/host/debug-agent.ts` — Phase 3 autonomous debug agent, spawned on-demand only after LKG rollback (max 3 attempts, cooldown)
+- `src/host/debug-agent.ts` — deterministic rule-based auto-fix + dry-boot transient detection (Phase 3; **NO LLM** — never calls a model), spawned on-demand only after LKG rollback (max 3 attempts, cooldown)
+- `src/host/session-health.ts` — session-log health scan: re-encodes single-whole-file-frame logs to canonical multi-frame (data preserved), quarantines corrupt first frames; run as the `dsh-safe-restart` pre-flight + loopback RPC `/dsh-maestro-supervisor-session-health` (fzstd + `node:zlib.zstdCompressSync`, Node ≥22.15)
+- `src/host/resume-tools.ts` — post-resume core-tool probe (`bash` by default) + `warnCoreToolLoss` (notify + tool-inventory system message; `resumeCoreToolPolicy: warn|park`) + `/dsh-maestro-supervisor-resume-tool-health` RPC/tool
 - `src/host/resume.ts` — `findInterrupted()` (tail 100, mtime pre-filter) and `findDanglingOpenTurns()` (full scan for recent sessions, mtime pre-filter). `parseDuration` for `5m`/`30s`/`1h`. See `## Known Issues` for why dangling needs full scan.
 - `src/host/plugin.ts` — in-tree Cordis host plugin: `inject: ['sessions','agents','connection']`, `apply()` (never throws), `runAutoResume()` (merges interrupted + dangling, 5m window), `resumeInterrupted()` (agents.get → agents.resume + recover provider/model + followup continue), `createResumeRpcHandler()` (`scan`/`resume` endpoints)
 - `src/client/auto-reload.ts` — in-tree Cordis client plugin: `apply()` with `ctx.effect`, `fetch HEAD /` polling on `offline`/`WebSocket close`/`visibilitychange`, `window.location.reload()` on `200`. Built via `tsc -p tsconfig.client.json && node scripts/build-client.mjs` → `lib/client.js` (`window.__ModuleLoader__.load` wrapper).
@@ -210,7 +212,7 @@ DSH_INTEGRATION=1 pnpm test -- tests/integration.test.ts  # needs real DSH web
 
 ## Conventions
 
-- **Deterministic, no LLM** — supervisor never calls a model; decisions are rule-based (`http !=200` → down, log pattern → error). Debug agent (Phase 3) is the LLM part and is spawned on-demand only after LKG rollback (max 3 attempts).
+- **Deterministic, no LLM** — supervisor never calls a model; decisions are rule-based (`http !=200` → down, log pattern → error). Debug auto-fix (Phase 3) is rule-based (`autoFixKnownPatterns` + dry-boot transient check) and is spawned on-demand only after LKG rollback (max 3 attempts).
 - **Daemon stays outside the tree** — the daemon (`bin.ts`/`supervisor.ts`/`snapshot.ts`/`health-poller.ts`, run via systemd) never adds a Cordis row or `cordis.patch.yml`; it must survive tree crashes. PID/port resolution via `ss -tlnp` + `resolve_tree()` like `dsh-safe-web-update`.
 - **The auto-resume plugin (`plugin.ts`/`index.ts` + `client/auto-reload.ts`) is the one deliberate exception** — it runs in-tree because it needs `sessions`/`connection`/`agents` (host) and `window`/`fetch`/`WebSocket` (client) context the daemon cannot reach. This is permitted only under two non-negotiable conditions:
   1. **`apply()` must never throw synchronously or let a rejected promise escape.** Every failure — expected or not — degrades to "auto-resume disabled for this boot," logged, never a crash. See `tests/plugin.test.ts` for the required coverage (a throwing `findInterrupted`, a throwing `resumeInterrupted`, a throwing RPC registration must all leave `apply()` non-throwing).
