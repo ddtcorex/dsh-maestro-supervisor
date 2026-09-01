@@ -120,6 +120,65 @@ function getResumeWithinMs(config?: SupervisorPluginConfig): number {
   return 5 * 60 * 1000
 }
 
+/**
+ * Core tools that must be visible on a resumed session. Part C targets the
+ * post-restart bash loss (`Error: unknown tool "bash"`); extend this list to
+ * widen the probe (e.g. 'cordis_inspect_query').
+ */
+export const CRITICAL_TOOLS = ['bash'] as const
+
+/** Minimal ToolRegistry surface the resume tool-view probe reads. */
+export interface ToolsLike {
+  get?(name: string, scope?: unknown): unknown
+  schemas?(scope?: unknown): { name?: string }[]
+}
+
+/** Caller-visible result of the post-resume tool-view probe. */
+export interface ToolViewProbe {
+  missing: string[]
+  visible: number
+}
+
+export type ToolViewProbeFn = (
+  tools: ToolsLike | undefined,
+  scope: string,
+  logger?: { info?: (msg: string) => void },
+) => ToolViewProbe
+
+export type ToolScopeResolver = (ctx: any, sessionId: string) => string
+
+/** Default: the resumed agent's tool scope is its top-level session id. */
+export const defaultResolveToolScope: ToolScopeResolver = (_ctx, sessionId) => sessionId
+
+/**
+ * Snapshot one session's visible tool view for the journal: which CRITICAL_TOOLS
+ * are missing from the SCOPED registry (not the global view) and how many tools
+ * are visible. When the tools service is absent or lacks `get`, the probe is
+ * skipped and reports no missing tools. The log line is the Part D trigger —
+ * `bash=false` at resume marks the loss the moment it happens.
+ * @param tools - the harness ToolRegistry service, or undefined when unavailable.
+ * @param scope - the session's tool scope (defaults to the top-level session id).
+ * @param logger - optional ctx logger; the probe writes its line when present.
+ */
+export function probeToolView(
+  tools: ToolsLike | undefined,
+  scope: string,
+  logger?: { info?: (msg: string) => void },
+): ToolViewProbe {
+  const probe: ToolViewProbe = { missing: [], visible: 0 }
+  try {
+    const get = tools?.get
+    if (typeof get !== 'function') return probe
+    probe.missing = [...CRITICAL_TOOLS].filter((name) => get(name, scope) === undefined)
+    const schemas = tools?.schemas?.(scope)
+    probe.visible = Array.isArray(schemas) ? schemas.length : 0
+  } catch {}
+  try {
+    logger?.info?.(`[supervisor] resumed ${scope}: bash=${!probe.missing.includes('bash')} visibleTools=${probe.visible} missing=${probe.missing.join(',') || 'none'}`)
+  } catch {}
+  return probe
+}
+
 export async function runAutoResume(
   ctx: any,
   opts: {
@@ -167,10 +226,17 @@ export async function runAutoResume(
 export async function resumeInterrupted(
   ctx: any,
   ids: string[],
-  deps: { readIntent?: (id: string) => RestartIntent | undefined; consumeIntent?: (id: string) => void } = {},
+  deps: {
+    readIntent?: (id: string) => RestartIntent | undefined
+    consumeIntent?: (id: string) => void
+    probeToolView?: ToolViewProbeFn
+    resolveToolScope?: ToolScopeResolver
+  } = {},
 ): Promise<string[]> {
   const doReadIntent = deps.readIntent ?? readIntent
   const doConsumeIntent = deps.consumeIntent ?? consumeIntent
+  const doProbe = deps.probeToolView ?? probeToolView
+  const doResolveToolScope = deps.resolveToolScope ?? defaultResolveToolScope
   const resumed: string[] = []
   for (const id of ids) {
     try {
@@ -253,6 +319,14 @@ export async function resumeInterrupted(
       try { if (resumeMessage !== idleMessage) doConsumeIntent(sessionId) } catch {}
       resumed.push(id)
       ctx.logger?.info?.(`[supervisor] auto-resume: sent recovery continue for ${id}`)
+      // C1 observability probe — snapshot the resumed session's SCOPED tool
+      // view at the success point so a post-resume bash loss surfaces in the
+      // journal the moment it happens (Part D reads this line). Defensive:
+      // absent ctx.tools just skips the probe, never fails the resume.
+      try {
+        const probeTools = (ctx.get?.('tools') as any) ?? (ctx as any).tools
+        doProbe(probeTools, doResolveToolScope(ctx, sessionId), ctx.logger)
+      } catch {}
     } catch (e: any) {
       ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
     }

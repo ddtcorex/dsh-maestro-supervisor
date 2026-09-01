@@ -14,6 +14,43 @@ export interface SupervisorPluginConfig {
     autoResumeEnabled?: boolean;
     sessionLogRoot?: string;
 }
+/**
+ * Core tools that must be visible on a resumed session. Part C targets the
+ * post-restart bash loss (`Error: unknown tool "bash"`); extend this list to
+ * widen the probe (e.g. 'cordis_inspect_query').
+ */
+export declare const CRITICAL_TOOLS: readonly ["bash"];
+/** Minimal ToolRegistry surface the resume tool-view probe reads. */
+export interface ToolsLike {
+    get?(name: string, scope?: unknown): unknown;
+    schemas?(scope?: unknown): {
+        name?: string;
+    }[];
+}
+/** Caller-visible result of the post-resume tool-view probe. */
+export interface ToolViewProbe {
+    missing: string[];
+    visible: number;
+}
+export type ToolViewProbeFn = (tools: ToolsLike | undefined, scope: string, logger?: {
+    info?: (msg: string) => void;
+}) => ToolViewProbe;
+export type ToolScopeResolver = (ctx: any, sessionId: string) => string;
+/** Default: the resumed agent's tool scope is its top-level session id. */
+export declare const defaultResolveToolScope: ToolScopeResolver;
+/**
+ * Snapshot one session's visible tool view for the journal: which CRITICAL_TOOLS
+ * are missing from the SCOPED registry (not the global view) and how many tools
+ * are visible. When the tools service is absent or lacks `get`, the probe is
+ * skipped and reports no missing tools. The log line is the Part D trigger —
+ * `bash=false` at resume marks the loss the moment it happens.
+ * @param tools - the harness ToolRegistry service, or undefined when unavailable.
+ * @param scope - the session's tool scope (defaults to the top-level session id).
+ * @param logger - optional ctx logger; the probe writes its line when present.
+ */
+export declare function probeToolView(tools: ToolsLike | undefined, scope: string, logger?: {
+    info?: (msg: string) => void;
+}): ToolViewProbe;
 export declare function runAutoResume(ctx: any, opts?: {
     findInterrupted?: typeof defaultFindInterrupted;
     findDanglingOpenTurns?: typeof defaultFindDanglingOpenTurns;
@@ -23,6 +60,8 @@ export declare function runAutoResume(ctx: any, opts?: {
 export declare function resumeInterrupted(ctx: any, ids: string[], deps?: {
     readIntent?: (id: string) => RestartIntent | undefined;
     consumeIntent?: (id: string) => void;
+    probeToolView?: ToolViewProbeFn;
+    resolveToolScope?: ToolScopeResolver;
 }): Promise<string[]>;
 export declare function createResumeRpcHandler(ctx: any, opts?: {
     resumeInterrupted?: typeof resumeInterrupted;
