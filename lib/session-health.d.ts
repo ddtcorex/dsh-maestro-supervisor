@@ -16,8 +16,10 @@
  * Classification uses fzstd's whole-file decode + streaming Decompress and
  * avoids a hand-rolled zstd frame-header walker (empirically wrong on both
  * real file shapes; fzstd whole-file decode already handles single and
- * concatenated frames). The `firstEmitPrefix` binary search is cheap
- * (log2 scans of ≤1–4 KB prefixes per file when healthy).
+ * concatenated frames). The first-frame probe only ever feeds the streaming
+ * decoder a bounded 64 KiB head (log2 scans of ≤256-byte-prefix steps), so it
+ * is stack-safe even on long-running many-frame logs — feeding a whole file
+ * into the streaming decoder recurses per frame and overflows the V8 stack.
  *
  * Repair re-encodes a single-frame whole-log into the canonical multi-frame
  * shape (frame #1 = exactly the header line, trailing line-batched frames),
@@ -32,12 +34,16 @@ export type SessionLogClass = 'ok' | 'single-frame-whole-log' | 'corrupt-first-f
 export interface SessionHealthEntry {
     path: string;
     klass: SessionLogClass;
+    remark?: string;
 }
 /**
  * Classify a single session log file per the validated algorithm:
- * whole-file decode success guards 'corrupt', otherwise the first-frame
- * prefix decode decides 'ok' (header-only first frame) vs the recoverable
- * 'single-frame-whole-log'. Empty files are not session logs.
+ * whole-file decode success guards 'corrupt', otherwise the first-frame head
+ * (bounded to 64 KiB) decides 'ok' (header-only first frame) vs the
+ * recoverable 'single-frame-whole-log'. A missing first-frame boundary within
+ * the cap means the first frame is bigger than 64 KiB — never a canonical
+ * healthy log — so it classifies as 'single-frame-whole-log'. Empty files are
+ * not session logs.
  */
 export declare function classifySessionLog(path: string): Promise<SessionHealthEntry>;
 /**

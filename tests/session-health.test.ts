@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { zstdCompressSync } from 'node:zlib'
+import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { decompress } from 'fzstd'
@@ -60,5 +61,29 @@ describe('session health scan', () => {
       expect(r.fixed).toBe(1)
       expect(r.remaining).toBe(0)
     } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  it('classifies a large many-frame log stack-safely (first-frame probe bounded to 64 KiB)', async () => {
+    // Regression: the first-frame probe must never feed the whole file into the
+    // streaming decoder. On real long-running logs (~5000+ concatenated frames)
+    // a whole-buffer push overflows the V8 stack (RangeError: Maximum call stack
+    // size exceeded) and runSessionHealthCheck throws, silently no-op'ing the
+    // safe-restart heal. Frames here are incompressible (base64 of random bytes),
+    // N≫2500, total ≥1.8 MB — enough to reproduce the overflow on the old code.
+    const dir = mkdtempSync(join(tmpdir(), 'sh-many-'))
+    try {
+      const frames: Buffer[] = [compress(Buffer.from(header('sMany')))]
+      let total = Buffer.byteLength(Buffer.from(header('sMany')))
+      const N = 12_000
+      for (let i = 0; i < N; i++) {
+        const line = randomBytes(200).toString('base64') + '\n'
+        frames.push(compress(Buffer.from(line, 'utf8')))
+        total += line.length
+      }
+      writeLog(dir, frames)
+      expect(total).toBeGreaterThanOrEqual(1.8 * 1024 * 1024)
+      const path = join(dir, 'session.jsonl.zstd')
+      expect((await classifySessionLog(path)).klass).toBe('ok')
+      await expect(runSessionHealthCheck(dir, { repair: true })).resolves.toMatchObject({ remaining: 0 })
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })

@@ -16,8 +16,10 @@
  * Classification uses fzstd's whole-file decode + streaming Decompress and
  * avoids a hand-rolled zstd frame-header walker (empirically wrong on both
  * real file shapes; fzstd whole-file decode already handles single and
- * concatenated frames). The `firstEmitPrefix` binary search is cheap
- * (log2 scans of ≤1–4 KB prefixes per file when healthy).
+ * concatenated frames). The first-frame probe only ever feeds the streaming
+ * decoder a bounded 64 KiB head (log2 scans of ≤256-byte-prefix steps), so it
+ * is stack-safe even on long-running many-frame logs — feeding a whole file
+ * into the streaming decoder recurses per frame and overflows the V8 stack.
  *
  * Repair re-encodes a single-frame whole-log into the canonical multi-frame
  * shape (frame #1 = exactly the header line, trailing line-batched frames),
@@ -35,27 +37,46 @@ import { zstdCompressSync } from 'node:zlib'
 import { join, basename } from 'node:path'
 
 export type SessionLogClass = 'ok' | 'single-frame-whole-log' | 'corrupt-first-frame' | 'not-a-session-log'
-export interface SessionHealthEntry { path: string; klass: SessionLogClass }
+export interface SessionHealthEntry { path: string; klass: SessionLogClass; remark?: string }
+
+/**
+ * Cap on the file head probed through the streaming decoder. Feeding a whole
+ * long-running log (thousands of concatenated zstd frames) into fzstd's
+ * streaming `Decompress` in one push recurses once per frame and overflows the
+ * V8 stack (RangeError: Maximum call stack size exceeded, seen on a real
+ * ~1.8 MB session log). Only the first frame matters for classification, so we
+ * never probe past 64 KiB — a canonical log's first frame is a few hundred
+ * bytes, and a frame can never legitimately straddle this cap.
+ */
+const FIRST_FRAME_CAP = 64 * 1024
 
 /** Standard zstd frame encoder (node:zlib) — decode-compatible with fzstd. */
 function compress(data: Buffer): Buffer {
   return zstdCompressSync(data)
 }
 
-/** Smallest input prefix at which a streaming decoder first emits output (≈ first-frame completion). */
-function firstEmitPrefix(buf: Buffer): number {
+type FrameHead = { found: true; end: number } | { found: false }
+
+/**
+ * Smallest head prefix at which the streaming decoder first emits output
+ * (≈ first-frame completion), searched only within FIRST_FRAME_CAP. Never
+ * pushes more than the cap into the decoder, so the probe is stack-safe on
+ * arbitrarily large many-frame logs.
+ */
+function firstFrameHead(buf: Buffer): FrameHead {
   const emits = (len: number): boolean => {
     let fired = false
     const d = new Decompress((chunk) => { if (chunk.length > 0) fired = true })
     d.push(buf.subarray(0, len))
     return fired
   }
-  let hi = buf.length
-  for (let l = 256; l <= buf.length; l += 256) if (emits(l)) { hi = l; break }
-  if (!emits(buf.length)) return buf.length
+  const cap = Math.min(buf.length, FIRST_FRAME_CAP)
+  let hi = cap
+  for (let l = 256; l <= cap; l += 256) if (emits(l)) { hi = l; break }
+  if (!emits(cap)) return { found: false }   // no frame boundary within the cap
   let lo = 0
   while (lo + 1 < hi) { const mid = (lo + hi) >> 1; emits(mid) ? hi = mid : lo = mid }
-  return hi
+  return { found: true, end: hi }
 }
 
 function isSingleHeaderLine(plain: Buffer): boolean {
@@ -66,20 +87,24 @@ function isSingleHeaderLine(plain: Buffer): boolean {
 
 /**
  * Classify a single session log file per the validated algorithm:
- * whole-file decode success guards 'corrupt', otherwise the first-frame
- * prefix decode decides 'ok' (header-only first frame) vs the recoverable
- * 'single-frame-whole-log'. Empty files are not session logs.
+ * whole-file decode success guards 'corrupt', otherwise the first-frame head
+ * (bounded to 64 KiB) decides 'ok' (header-only first frame) vs the
+ * recoverable 'single-frame-whole-log'. A missing first-frame boundary within
+ * the cap means the first frame is bigger than 64 KiB — never a canonical
+ * healthy log — so it classifies as 'single-frame-whole-log'. Empty files are
+ * not session logs.
  */
 export async function classifySessionLog(path: string): Promise<SessionHealthEntry> {
   let buf: Buffer
   try { buf = readFileSync(path) } catch { return { path, klass: 'not-a-session-log' } }
   if (buf.length === 0) return { path, klass: 'not-a-session-log' }
-  let whole: Buffer
-  try { whole = Buffer.from(decompress(buf)) } catch { return { path, klass: 'corrupt-first-frame' } }
-  const firstEnd = firstEmitPrefix(buf)
-  let first: Buffer | undefined
-  try { first = Buffer.from(decompress(buf.subarray(0, firstEnd))) } catch { /* prefix not a complete frame */ }
-  if (first?.byteLength !== undefined && isSingleHeaderLine(first)) return { path, klass: 'ok' }
+  try { decompress(buf) } catch { return { path, klass: 'corrupt-first-frame' } }
+  const head = firstFrameHead(buf)
+  if (head.found) {
+    let first: Buffer | undefined
+    try { first = Buffer.from(decompress(buf.subarray(0, head.end))) } catch { /* prefix not a complete frame */ }
+    if (first?.byteLength !== undefined && isSingleHeaderLine(first)) return { path, klass: 'ok' }
+  }
   return { path, klass: 'single-frame-whole-log' }   // whole-file decodes; first frame isn't header-only → recoverable
 }
 
@@ -125,7 +150,14 @@ export async function scanSessionLogs(root: string): Promise<SessionHealthEntry[
   }
   walk(root)
   const out: SessionHealthEntry[] = []
-  for (const p of found) out.push(await classifySessionLog(p))
+  for (const p of found) {
+    try {
+      out.push(await classifySessionLog(p))
+    } catch (err) {
+      // One unreadable / unclassifiable file must never abort the whole scan.
+      out.push({ path: p, klass: 'corrupt-first-frame', remark: err instanceof Error ? err.message : String(err) })
+    }
+  }
   return out
 }
 
@@ -146,24 +178,30 @@ export async function runSessionHealthCheck(
   let quarantined = 0
   let remaining = 0
   for (const entry of await scanSessionLogs(root)) {
-    switch (entry.klass) {
-      case 'single-frame-whole-log':
-        if (repair) { await repairSingleFrameLog(entry.path); fixed++ } else remaining++
-        break
-      case 'corrupt-first-frame':
-        if (quarantine) {
-          let aside = entry.path + '.corrupt-' + Date.now() + '.bak'
-          let n = 0
-          while (existsSync(aside)) aside = entry.path + '.corrupt-' + Date.now() + '-' + (++n) + '.bak'
-          renameSync(entry.path, aside)
-          quarantined++
-        } else remaining++
-        break
-      case 'not-a-session-log':
-        remaining++
-        break
-      default:
-        break
+    try {
+      switch (entry.klass) {
+        case 'single-frame-whole-log':
+          if (repair) { await repairSingleFrameLog(entry.path); fixed++ } else remaining++
+          break
+        case 'corrupt-first-frame':
+          if (quarantine) {
+            let aside = entry.path + '.corrupt-' + Date.now() + '.bak'
+            let n = 0
+            while (existsSync(aside)) aside = entry.path + '.corrupt-' + Date.now() + '-' + (++n) + '.bak'
+            renameSync(entry.path, aside)
+            quarantined++
+          } else remaining++
+          break
+        case 'not-a-session-log':
+          remaining++
+          break
+        default:
+          break
+      }
+    } catch {
+      // Repair/quarantine of a single entry failed — it stays unhealthy and
+      // can never abort the whole pass. Counts always reconcile.
+      remaining++
     }
   }
   return { fixed, quarantined, remaining }
