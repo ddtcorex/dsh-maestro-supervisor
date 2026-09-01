@@ -8,12 +8,26 @@
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js';
 import type { RestartIntent } from './intents.js';
 import { runSessionHealthCheck } from './session-health.js';
+export * from './resume-tools.js';
 export declare const inject: readonly ["sessions", "agents", "connection", "tools", "skills"];
 export interface SupervisorPluginConfig {
     autoResumeWithin?: number | string;
     autoResumeEnabled?: boolean;
     sessionLogRoot?: string;
+    resumeCoreToolPolicy?: ResumeCoreToolPolicy;
 }
+/**
+ * C2 — mitigation policy when a resumed session's post-resume probe (C1)
+ * reports a core tool (bash) missing from its SCOPED tool view:
+ *  - 'warn': notify the operator once + inject a "System:" inventory message
+ *    into the session telling the model which tools it CAN still call
+ *    (default — the loss is real, but the session may still be usable).
+ *  - 'park': additionally record the session id in the park set (exposed via
+ *    maestro_resume_tool_health / /dsh-maestro-supervisor-resume-tool-health)
+ *    and flag the notify with "(manual reopen required)" — the operator must
+ *    reopen the session fresh because the core-tool surface is not guaranteed.
+ */
+export type ResumeCoreToolPolicy = 'warn' | 'park';
 /**
  * Core tools that must be visible on a resumed session. Part C targets the
  * post-restart bash loss (`Error: unknown tool "bash"`); extend this list to
@@ -62,10 +76,15 @@ export declare function resumeInterrupted(ctx: any, ids: string[], deps?: {
     consumeIntent?: (id: string) => void;
     probeToolView?: ToolViewProbeFn;
     resolveToolScope?: ToolScopeResolver;
+    notify?: (line: string) => Promise<void>;
+    injectSessionMessage?: (sessionId: string, content: string) => unknown;
+    config?: SupervisorPluginConfig;
 }): Promise<string[]>;
 export declare function createResumeRpcHandler(ctx: any, opts?: {
     resumeInterrupted?: typeof resumeInterrupted;
     config?: SupervisorPluginConfig;
+    notify?: (line: string) => Promise<void>;
+    injectSessionMessage?: (sessionId: string, content: string) => unknown;
 }): (endpoint: string, payload: unknown, _signal: AbortSignal) => Promise<{
     ok: boolean;
     value: import("./resume.js").ResumeResult;

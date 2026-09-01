@@ -17,6 +17,13 @@ import { makeSkillProvider } from './skill-provider.js'
 import { registerRestartTool } from './restart-tool.js'
 import { makePreExecuteGuard } from './self-kill-guard.js'
 import { runSessionHealthCheck } from './session-health.js'
+import {
+  warnCoreToolLoss,
+  recordResumedSession,
+  recordResumeProbe,
+  registerResumeToolHealthService,
+} from './resume-tools.js'
+export * from './resume-tools.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -26,7 +33,21 @@ export interface SupervisorPluginConfig {
   autoResumeWithin?: number | string // in MINUTES if number, or "5m"/"30s"/"1h" string
   autoResumeEnabled?: boolean
   sessionLogRoot?: string // session-log dir for the session-health scan (env SESSIONS_ROOT wins)
+  resumeCoreToolPolicy?: ResumeCoreToolPolicy // C2 — see type below
 }
+
+/**
+ * C2 — mitigation policy when a resumed session's post-resume probe (C1)
+ * reports a core tool (bash) missing from its SCOPED tool view:
+ *  - 'warn': notify the operator once + inject a "System:" inventory message
+ *    into the session telling the model which tools it CAN still call
+ *    (default — the loss is real, but the session may still be usable).
+ *  - 'park': additionally record the session id in the park set (exposed via
+ *    maestro_resume_tool_health / /dsh-maestro-supervisor-resume-tool-health)
+ *    and flag the notify with "(manual reopen required)" — the operator must
+ *    reopen the session fresh because the core-tool surface is not guaranteed.
+ */
+export type ResumeCoreToolPolicy = 'warn' | 'park'
 
 function parseDuration(s: string): number | undefined {
   if (!s) return undefined
@@ -76,6 +97,40 @@ function getAutoResumeEnabled(config?: SupervisorPluginConfig): boolean {
     }
   } catch {}
   return true
+}
+
+/**
+ * C2 — resolve the mitigation policy with exactly the same precedence chain as
+ * getAutoResumeEnabled: (1) the Cordis-supplied plugin config (cordis.patch.yml
+ * `config:` block / whatever apply() receives — highest precedence), (2) env
+ * DSH_SUPERVISOR_RESUME_CORE_TOOL_POLICY, (3) ~/.dsh/.supervisor/config.json,
+ * (4) ~/.dsh/maestro/settings.json (domains.supervisor.resumeCoreToolPolicy),
+ * (5) 'warn'. Any other value falls through to the default 'warn'.
+ */
+function getResumeCoreToolPolicy(config?: SupervisorPluginConfig): ResumeCoreToolPolicy {
+  if (config?.resumeCoreToolPolicy === 'warn' || config?.resumeCoreToolPolicy === 'park') {
+    return config.resumeCoreToolPolicy
+  }
+  const env = process.env.DSH_SUPERVISOR_RESUME_CORE_TOOL_POLICY
+  if (env) {
+    const v = env.trim().toLowerCase()
+    if (v === 'warn' || v === 'park') return v
+  }
+  try {
+    const cfgPath = path.join(os.homedir(), '.dsh/.supervisor/config.json')
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'))
+      const raw = (cfg as any).resumeCoreToolPolicy
+      if (raw === 'warn' || raw === 'park') return raw
+    }
+    const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+    if (fs.existsSync(maestroPath)) {
+      const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
+      const raw = j?.domains?.supervisor?.resumeCoreToolPolicy ?? j?.supervisor?.resumeCoreToolPolicy
+      if (raw === 'warn' || raw === 'park') return raw
+    }
+  } catch {}
+  return 'warn'
 }
 
 function getResumeWithinMs(config?: SupervisorPluginConfig): number {
@@ -215,7 +270,7 @@ export async function runAutoResume(
       return
     }
     ctx.logger?.info?.(`[supervisor] auto-resume: ${merged.length}/${scanned} interrupted within ${withinMs}ms: ${merged.slice(0, 3).join(', ')}`)
-    await doResume(ctx, merged)
+    await doResume(ctx, merged, { ...(opts?.config !== undefined ? { config: opts.config } : {}) })
   } catch (e: any) {
     try {
       ctx.logger?.warn?.(`[supervisor] auto-resume error: ${e?.message ?? String(e)}`)
@@ -231,12 +286,17 @@ export async function resumeInterrupted(
     consumeIntent?: (id: string) => void
     probeToolView?: ToolViewProbeFn
     resolveToolScope?: ToolScopeResolver
+    // C2 injectable seams — default to the real notifier + real session push.
+    notify?: (line: string) => Promise<void>
+    injectSessionMessage?: (sessionId: string, content: string) => unknown
+    config?: SupervisorPluginConfig
   } = {},
 ): Promise<string[]> {
   const doReadIntent = deps.readIntent ?? readIntent
   const doConsumeIntent = deps.consumeIntent ?? consumeIntent
   const doProbe = deps.probeToolView ?? probeToolView
   const doResolveToolScope = deps.resolveToolScope ?? defaultResolveToolScope
+  const coreToolPolicy = getResumeCoreToolPolicy(deps.config)
   const resumed: string[] = []
   for (const id of ids) {
     try {
@@ -323,9 +383,22 @@ export async function resumeInterrupted(
       // view at the success point so a post-resume bash loss surfaces in the
       // journal the moment it happens (Part D reads this line). Defensive:
       // absent ctx.tools just skips the probe, never fails the resume.
+      // C2 mitigation — when the probe reports a CORE tool lost from the
+      // resumed session's SCOPED view, notify the operator + inject the tool-
+      // inventory System message (park policy additionally parks the id for a
+      // manual reopen). Both record the session as "currently resumed" and
+      // the probe as the freshest observation for maestro_resume_tool_health.
       try {
         const probeTools = (ctx.get?.('tools') as any) ?? (ctx as any).tools
-        doProbe(probeTools, doResolveToolScope(ctx, sessionId), ctx.logger)
+        const probe = doProbe(probeTools, doResolveToolScope(ctx, sessionId), ctx.logger)
+        recordResumedSession(sessionId)
+        if (probe.missing.length) {
+          await warnCoreToolLoss(ctx, sessionId, doResolveToolScope(ctx, sessionId), probe, coreToolPolicy, {
+            notify: deps.notify,
+            injectSessionMessage: deps.injectSessionMessage,
+          })
+        }
+        recordResumeProbe(probe)
       } catch {}
     } catch (e: any) {
       ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
@@ -336,7 +409,12 @@ export async function resumeInterrupted(
 
 export function createResumeRpcHandler(
   ctx: any,
-  opts: { resumeInterrupted?: typeof resumeInterrupted; config?: SupervisorPluginConfig } = {},
+  opts: {
+    resumeInterrupted?: typeof resumeInterrupted
+    config?: SupervisorPluginConfig
+    notify?: (line: string) => Promise<void>
+    injectSessionMessage?: (sessionId: string, content: string) => unknown
+  } = {},
 ) {
   const resume = opts.resumeInterrupted ?? resumeInterrupted
   return async (endpoint: string, payload: unknown, _signal: AbortSignal) => {
@@ -355,7 +433,15 @@ export function createResumeRpcHandler(
     if (!ids.length) {
       return { ok: false, error: { code: 'bad-request', message: 'resume requires at least one session id' } }
     }
-    return { ok: true, value: { resumed: await resume(ctx, ids) } }
+    // Forward the resume-relevant surface (config so resumeCoreToolPolicy
+    // resolves, plus the C2 injectable seams). Optional keys keep the deps
+    // object minimal — absent opts only yields `{}`.
+    const resumeDeps = {
+      ...(opts.config !== undefined ? { config: opts.config } : {}),
+      ...(opts.notify !== undefined ? { notify: opts.notify } : {}),
+      ...(opts.injectSessionMessage !== undefined ? { injectSessionMessage: opts.injectSessionMessage } : {}),
+    }
+    return { ok: true, value: { resumed: await resume(ctx, ids, resumeDeps) } }
   }
 }
 
@@ -555,6 +641,12 @@ export function apply(ctx: any, config: SupervisorPluginConfig = {}): void {
       ctx.effect(() => registerSessionHealthService(ctx, config), 'supervisor:session-health')
     } catch (e: any) {
       try { ctx.logger?.warn?.(`[supervisor] session-health effect failed: ${e?.message ?? String(e)}`) } catch {}
+    }
+
+    try {
+      ctx.effect(() => registerResumeToolHealthService(ctx), 'supervisor:resume-tool-health')
+    } catch (e: any) {
+      try { ctx.logger?.warn?.(`[supervisor] resume-tool-health effect failed: ${e?.message ?? String(e)}`) } catch {}
     }
 
     ctx.effect(() => {

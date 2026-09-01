@@ -165,7 +165,7 @@ describe('runAutoResume', () => {
     const scan = async () => ({ scanned: 2, interrupted: ['proj/a-1', 'proj/b-2'] })
     const resumeSpy = vi.fn(async () => {})
     await runAutoResume(ctx, { findInterrupted: scan as any, findDanglingOpenTurns: noDangling, resumeInterrupted: resumeSpy, config: enabledConfig })
-    expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1', 'proj/b-2'])
+    expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1', 'proj/b-2'], { config: enabledConfig })
   })
 
   it('skips resumeInterrupted entirely when nothing is interrupted', async () => {
@@ -246,7 +246,7 @@ describe('runAutoResume', () => {
       resumeInterrupted: resumeSpy,
       config: enabledConfig,
     })).resolves.toBeUndefined()
-    expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1'])
+    expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1'], { config: enabledConfig })
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
   })
 })
@@ -373,7 +373,8 @@ describe('apply', () => {
 
     await expect(handler('resume', { ids: ['proj/session-a'] }, new AbortController().signal))
       .resolves.toEqual({ ok: true, value: { resumed: ['proj/session-a'] } })
-    expect(resume).toHaveBeenCalledWith(ctx, ['proj/session-a'])
+    // The handler forwards a deps object (empty here — no config/seams passed).
+    expect(resume).toHaveBeenCalledWith(ctx, ['proj/session-a'], {})
   })
 
   it('registers each RPC handler exactly once on host-valid channel names', () => {
