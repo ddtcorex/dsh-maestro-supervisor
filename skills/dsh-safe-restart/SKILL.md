@@ -8,11 +8,14 @@ compatibility: dsh
 
 ## Purpose
 
-One `dsh web` process serves both the live Web UI on port 3080 and the
-GitLab-webhook service on port 3000. A host restart drops the live socket and
-the in-flight turn, although sessions rehydrate from the append-only log when
-the browser reconnects. Treat a restart as disruptive: validate first and get
-explicit user consent before a real swap.
+One `dsh web` process owns the whole Web surface: the raw webserver on
+`127.0.0.1:3082` (launch-token fence) plus the two Maestro proxies created by
+`dsh-maestro-remote` — the LAN PIN gate on `:3080` (canonical local/LAN URL)
+and the public tunnel proxy on `:3081` — and the `/hooks/gitlab-mr*` webhook
+intake (port 3000 is deprecated/unbound). A host restart drops the live
+socket and the in-flight turn, although sessions rehydrate from the
+append-only log when the browser reconnects. Treat a restart as disruptive:
+validate first and get explicit user consent before a real swap.
 
 ## Classify the change before touching the live process
 
@@ -30,8 +33,8 @@ explicit user consent before a real swap.
    carries the expected marker.
 2. Dry-boot the candidate on an ephemeral port with an isolated `DSH_HOME`.
    Keep the live process and its sessions/settings untouched. If the review
-   webhook conflicts on port 3000, exclude that provider for the candidate or
-   run a no-server composition check instead.
+   webhook conflicts on a bound port, exclude that provider for the candidate
+   or run a no-server composition check instead.
 3. Verify HTTP 200 and the new marker on the candidate. Retain last-known-good
    assets until the real swap has passed post-swap checks.
 4. Ask for explicit consent and timing. “restart đi” is consent; silence is
@@ -63,9 +66,10 @@ and refuses to launch if ports are still occupied. `--dry-run` never runs
 
 Do not read the top of an old append-only log as liveness evidence. Instead:
 
-1. Confirm exactly one healthy listener tree owns ports 3000 and 3080 with
-   `ss -tlnp`.
-2. Confirm HTTP 200 from port 3080.
+1. Confirm exactly one healthy process owns the listener tree 3080/3081 +
+   127.0.0.1:3082 with `ss -tlnp` (port 3000 is no longer bound).
+2. Confirm HTTP 200 from port 3080 (the Maestro PIN login page is 200; the
+   app itself loads after the PIN).
 3. Check served bytes contain the **new**, unique marker; or make a fresh
    browser/Playwright probe for the changed UI. Shared third-party markers are
    not sufficient proof.
