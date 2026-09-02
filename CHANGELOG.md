@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.6] - 2026-09-02
+
+### Fixed
+
+- **Skill symlink** — resolve the skill symlink before deriving PLUGIN_DIR (#57).
+
+
 ## [0.7.5] - 2026-09-02
 
 ### Fixed
