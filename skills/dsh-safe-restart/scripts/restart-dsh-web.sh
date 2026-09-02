@@ -15,7 +15,15 @@ marker="${DSH_SUPERVISOR_MARKER:-$HOME/.dsh/.supervisor/planned-restart}"
 # the script's own path — never a hard-coded location.
 dsh_home="${DSH_HOME:-$HOME/.dsh}"
 export SESSIONS_ROOT="${SESSIONS_ROOT:-$dsh_home/sessions}"
-PLUGIN_DIR="${DSH_SUPERVISOR_PLUGIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+# Resolve the script's real location first: when invoked through a symlinked
+# skill path (e.g. ~/.agents/skills/dsh-safe-restart/...), BASH_SOURCE keeps the
+# link and "../../.." lands in ~/.agents — breaking the session-health preflight
+# import (lib/session-health.js). readlink -f recovers the package checkout.
+SCRIPT_SRC="${BASH_SOURCE[0]}"
+if resolved="$(readlink -f "$SCRIPT_SRC" 2>/dev/null)" && [ -n "$resolved" ]; then
+  SCRIPT_SRC="$resolved"
+fi
+PLUGIN_DIR="${DSH_SUPERVISOR_PLUGIN_DIR:-$(cd "$(dirname "$SCRIPT_SRC")/../../.." && pwd)}"
 confirmed=false
 dry_run=false
 auto_mode=false
