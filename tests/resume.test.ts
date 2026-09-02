@@ -222,4 +222,21 @@ describe('findDanglingOpenTurns — genuinely fresh crash, no closer written yet
     writeJsonl(dir, ['not json at all', '{"broken"'])
     await expect(findDanglingOpenTurns(tmp)).resolves.toBeDefined()
   })
+
+  it.skipIf(!zstdAvailable)('detects a dangling open turn in a zstd log whose decompressed size exceeds the default execSync maxBuffer', async () => {
+    // Regression: real worker sessions decompress to 8-23MB (well over the 1MB
+    // default execSync maxBuffer). readSessionAllLines ran `zstd -d -c ...`
+    // without a maxBuffer, so any such session threw ENOBUFS and was silently
+    // swallowed by the per-session catch — the open-turn scan never saw it.
+    const dir = sessionDir('proj', 'sess-big-open-turn')
+    const now = Date.now()
+    const evts: string[] = []
+    for (let i = 1; i <= 20000; i++) {
+      evts.push(JSON.stringify({ type: 'turn/start', time: now - 2000, data: { turn: i } }))
+    }
+    writeZstd(dir, evts, new Date(now - 1000))
+    mockedExecSync.mockClear() // ignore the fixture zstd compression calls
+    const res = await findDanglingOpenTurns(tmp)
+    expect(res.interrupted).toContain('proj/sess-big-open-turn')
+  })
 })
