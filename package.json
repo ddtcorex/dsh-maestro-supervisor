@@ -1,6 +1,6 @@
 {
   "name": "@ddtcorex/dsh-maestro-supervisor",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "Supervisor daemon for DSH Web resilience — auto-detect crashes, rollback to LKG, report",
   "type": "module",
   "main": "./lib/index.js",

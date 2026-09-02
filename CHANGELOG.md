@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.7] - 2026-09-03
+
+### Fixed
+
+- **Resume full-scan maxBuffer** — `findDanglingOpenTurns` dropped every session
+  whose decompressed log exceeds execSync's 1MB default (real worker logs decode to
+  8–23MB): `readSessionAllLines` threw ENOBUFS and the per-session catch silently
+  skipped it, so a big session's open turn after restart was never detected (#59).
+
+### Added
+
+- **Durable out-of-band resume audit log** — the in-tree auto-resume now appends
+  one JSONL entry per step to `~/.dsh/.supervisor/resume.log.jsonl` (mode 600):
+  `scan` (scanned + ids), `no-agent`, `resume-failed` (error), `resumed` (intent vs
+  idle prompt). `ctx.logger` never reached `dsh-web.log`, so `agents.resume`
+  failures were previously invisible (#59).
+
+
 ## [0.7.6] - 2026-09-02
 
 ### Fixed
