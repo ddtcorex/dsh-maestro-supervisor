@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.4] - 2026-09-02
+
+### Fixed
+
+- `dsh-safe-restart` recipe now detects the local-pin-gate topology (3000/3080/3081/3082) and health-checks :3080 (200/401/303) with a :3082 raw-webserver fallback, instead of hard-failing "no listeners found" whenever :3080 was unbound (the 2026-09-02 outage shape).
+
 All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
