@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.5] - 2026-09-02
+
+### Fixed
+
+- Daemon resume RPC now mints the `dsh-auth-*` session cookie first (parses the
+  newest boot launch line from `~/.dsh/dsh-web.log`, trades the token on the raw
+  webserver) before POSTing to `/dsh-maestro-supervisor-resume/resume`. On the
+  local-pin-gate topology the RPC sits behind the browser-trust fence and 401s
+  without the cookie (`RESUME FAILED`). Falls back to the old unauthenticated
+  call when no boot token is readable.
+
 ## [0.7.4] - 2026-09-02
 
 ### Fixed
