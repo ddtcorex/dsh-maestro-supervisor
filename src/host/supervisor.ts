@@ -8,6 +8,7 @@ import { resolveHarnessRoot } from './paths.js'
 import { readSupervisorConfig } from './config.js'
 import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart, clearPlannedRestart, PLANNED_RESTART_TTL_MS } from './restart-guards.js'
 import type { RestartRequest } from './restart-guards.js'
+import { mintDshSessionCookie, type MintCookieOpts } from './dsh-session.js'
 import { buildKillStalePortsCommand } from './restart-guards.js'
 
 export interface SupervisorDeps {
@@ -55,14 +56,16 @@ export interface SupervisorDeps {
 export async function resumeViaRpc(
   ids: string[],
   fetchFn: (url: string, init: RequestInit) => Promise<Response> = globalThis.fetch,
+  extraHeaders: Record<string, string> = {},
 ): Promise<{ resumed: string[] }> {
   const rpcId = crypto.randomUUID()
   const response = await fetchFn('http://127.0.0.1:3080/dsh-maestro-supervisor-resume/resume', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...extraHeaders },
     body: JSON.stringify({ type: 'client-request', rpcId, method: 'resume', payload: { ids } }),
   })
   if (!response.ok) throw new Error(`resume RPC returned HTTP ${response.status}`)
+
   const envelope = await response.json() as any
   const resumed = envelope?.type === 'server-response'
     && envelope?.rpcId === rpcId
@@ -72,6 +75,23 @@ export async function resumeViaRpc(
     : undefined
   if (resumed === undefined) throw new Error('resume RPC returned an invalid result')
   return { resumed }
+}
+
+/**
+ * Daemon default resume path: mint the `dsh-auth-*` session cookie first (the
+ * `/resume` RPC sits behind the raw webserver's browser-trust fence, which 401s
+ * cookie-less loopback calls since the local-pin-gate topology moved the
+ * webserver behind the PIN proxies) and attach it to the POST. Falls back to an
+ * unauthenticated POST when no boot token is readable — old behavior preserved.
+ */
+export async function resumeViaRpcWithSession(
+  ids: string[],
+  fetchFn: (url: string, init: RequestInit) => Promise<Response> = globalThis.fetch,
+  opts: MintCookieOpts = {},
+): Promise<{ resumed: string[] }> {
+  let cookie: string | undefined
+  try { cookie = await mintDshSessionCookie(fetchFn, opts) } catch { cookie = undefined }
+  return resumeViaRpc(ids, fetchFn, cookie === undefined ? {} : { cookie })
 }
 
 export class Supervisor {
@@ -136,7 +156,7 @@ export class Supervisor {
   }
 
   private getResumeSessions() {
-    return this.deps.resumeSessions ?? resumeViaRpc
+    return this.deps.resumeSessions ?? resumeViaRpcWithSession
   }
 
   private getAutoResumeEnabled(): boolean {
