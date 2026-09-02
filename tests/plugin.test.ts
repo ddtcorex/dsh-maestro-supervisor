@@ -126,6 +126,42 @@ describe('resumeInterrupted', () => {
     await expect(resumeInterrupted(ctx, ['proj/session-abc'])).resolves.toEqual([])
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
   })
+
+  it('writes an out-of-band resume-failed log entry when agents.resume throws', async () => {
+    const persistence = {
+      load: async () => ({
+        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        meta: { agentPreset: 'default' },
+      }),
+    }
+    const ctx = makeCtx({
+      sessionPersistence: persistence,
+      sessions: { get: () => undefined, create: () => true },
+      agents: { get: () => undefined, resume: async () => { throw new Error('factory unavailable') } },
+    })
+    const entries: any[] = []
+    await resumeInterrupted(ctx, ['proj/session-abc'], { logResume: (e: any) => entries.push(e) })
+    expect(entries.length).toBeGreaterThanOrEqual(1)
+    const failed = entries.find((e) => e.kind === 'resume-failed')
+    expect(failed).toBeDefined()
+    expect(failed.sessionId).toBe('session-abc')
+    expect(String(failed.error)).toContain('factory unavailable')
+  })
+
+  it('writes an out-of-band resumed log entry when the follow-up continue is sent', async () => {
+    const followup = vi.fn()
+    const ctx = makeCtx({ agents: { get: () => ({ followup }) } })
+    const entries: any[] = []
+    const resumed = await resumeInterrupted(ctx, ['proj/abc'], {
+      readIntent: () => undefined,
+      consumeIntent: () => {},
+      logResume: (e: any) => entries.push(e),
+    })
+    expect(resumed).toEqual(['proj/abc'])
+    const ok = entries.find((e) => e.kind === 'resumed')
+    expect(ok).toBeDefined()
+    expect(ok.sessionId).toBe('abc')
+  })
 })
 
 describe('runAutoResume', () => {
@@ -248,6 +284,40 @@ describe('runAutoResume', () => {
     })).resolves.toBeUndefined()
     expect(resumeSpy).toHaveBeenCalledWith(ctx, ['proj/a-1'], { config: enabledConfig })
     expect(ctx._logs.some((l: string) => l.includes('warn:'))).toBe(true)
+  })
+
+  it('writes an out-of-band scan audit entry with scanned count and detected ids', async () => {
+    const ctx = makeCtx()
+    const scan = async () => ({ scanned: 2, interrupted: ['proj/a-1', 'proj/b-2'] })
+    const entries: any[] = []
+    await runAutoResume(ctx, {
+      findInterrupted: scan as any,
+      findDanglingOpenTurns: noDangling,
+      resumeInterrupted: async () => {},
+      logResume: (e: any) => entries.push(e),
+      config: enabledConfig,
+    })
+    const scanEntry = entries.find((e) => e.kind === 'scan')
+    expect(scanEntry).toBeDefined()
+    expect(scanEntry.scanned).toBe(2)
+    expect(scanEntry.interrupted).toEqual(['proj/a-1', 'proj/b-2'])
+  })
+
+  it('writes a scan audit entry even when nothing is interrupted', async () => {
+    const ctx = makeCtx()
+    const scan = async () => ({ scanned: 9, interrupted: [] })
+    const entries: any[] = []
+    await runAutoResume(ctx, {
+      findInterrupted: scan as any,
+      findDanglingOpenTurns: noDangling,
+      resumeInterrupted: async () => {},
+      logResume: (e: any) => entries.push(e),
+      config: enabledConfig,
+    })
+    const scanEntry = entries.find((e) => e.kind === 'scan')
+    expect(scanEntry).toBeDefined()
+    expect(scanEntry.scanned).toBe(9)
+    expect(scanEntry.interrupted).toEqual([])
   })
 })
 

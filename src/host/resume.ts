@@ -114,7 +114,11 @@ async function readSessionAllLines(zstdPath: string, jsonlPath: string, sinceMs:
   }
   if (fs.existsSync(zstdPath)) {
     const { execSync } = await import('node:child_process')
-    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null`, { encoding: 'utf-8' })
+    // maxBuffer must exceed the decompressed size of any real session log —
+    // worker sessions decode to 8-23MB while execSync's default 1MB would
+    // throw ENOBUFS and silently drop the session from every scan that needs
+    // the full file (findDanglingOpenTurns). Use 64MB to leave headroom.
+    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null`, { encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 })
     return out.split('\n').filter(Boolean)
   }
   if (fs.existsSync(jsonlPath)) {
