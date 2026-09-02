@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
 import { readIntent, consumeIntent } from './intents.js'
 import type { RestartIntent } from './intents.js'
+import { appendResumeLog, type ResumeLogEntry } from './resume-log.js'
 import { makeSkillProvider } from './skill-provider.js'
 import { registerRestartTool } from './restart-tool.js'
 import { makePreExecuteGuard } from './self-kill-guard.js'
@@ -240,6 +241,7 @@ export async function runAutoResume(
     findInterrupted?: typeof defaultFindInterrupted
     findDanglingOpenTurns?: typeof defaultFindDanglingOpenTurns
     resumeInterrupted?: typeof resumeInterrupted
+    logResume?: (entry: ResumeLogEntry) => void
     config?: SupervisorPluginConfig
   } = {}
 ): Promise<void> {
@@ -247,8 +249,10 @@ export async function runAutoResume(
     const doFind = opts.findInterrupted ?? defaultFindInterrupted
     const doFindDangling = opts.findDanglingOpenTurns ?? defaultFindDanglingOpenTurns
     const doResume = opts.resumeInterrupted ?? resumeInterrupted
+    const doLog = opts.logResume ?? ((entry: ResumeLogEntry) => { try { appendResumeLog(entry) } catch {} })
     if (!getAutoResumeEnabled(opts?.config)) {
       ctx.logger?.info?.('[supervisor] auto-resume disabled — skip')
+      doLog({ ts: Date.now(), kind: 'scan', scanned: 0, interrupted: [], detail: 'auto-resume disabled' })
       return
     }
     const withinMs = getResumeWithinMs(opts?.config)
@@ -265,12 +269,16 @@ export async function runAutoResume(
       ctx.logger?.warn?.(`[supervisor] auto-resume: dangling-open-turn scan failed, continuing with closed-turn results only: ${e?.message ?? String(e)}`)
     }
     const merged = Array.from(new Set([...interrupted, ...dangling]))
+    doLog({ ts: Date.now(), kind: 'scan', scanned, interrupted: merged, detail: `withinMs=${withinMs}` })
     if (!merged.length) {
       ctx.logger?.info?.(`[supervisor] auto-resume: 0/${scanned} interrupted within ${withinMs}ms — nothing to do`)
       return
     }
     ctx.logger?.info?.(`[supervisor] auto-resume: ${merged.length}/${scanned} interrupted within ${withinMs}ms: ${merged.slice(0, 3).join(', ')}`)
-    await doResume(ctx, merged, { ...(opts?.config !== undefined ? { config: opts.config } : {}) })
+    await doResume(ctx, merged, {
+      ...(opts?.config !== undefined ? { config: opts.config } : {}),
+      ...(opts.logResume !== undefined ? { logResume: opts.logResume } : {}),
+    })
   } catch (e: any) {
     try {
       ctx.logger?.warn?.(`[supervisor] auto-resume error: ${e?.message ?? String(e)}`)
@@ -289,6 +297,10 @@ export async function resumeInterrupted(
     // C2 injectable seams — default to the real notifier + real session push.
     notify?: (line: string) => Promise<void>
     injectSessionMessage?: (sessionId: string, content: string) => unknown
+    // Durable out-of-band resume audit trail (default: resume-log.ts sidecar).
+    // Injected in tests so failures/resumptions can be asserted without
+    // touching ~/.dsh/.supervisor.
+    logResume?: (entry: ResumeLogEntry) => void
     config?: SupervisorPluginConfig
   } = {},
 ): Promise<string[]> {
@@ -296,6 +308,7 @@ export async function resumeInterrupted(
   const doConsumeIntent = deps.consumeIntent ?? consumeIntent
   const doProbe = deps.probeToolView ?? probeToolView
   const doResolveToolScope = deps.resolveToolScope ?? defaultResolveToolScope
+  const doLog = deps.logResume ?? ((entry: ResumeLogEntry) => { try { appendResumeLog(entry) } catch {} })
   const coreToolPolicy = getResumeCoreToolPolicy(deps.config)
   const resumed: string[] = []
   for (const id of ids) {
@@ -328,6 +341,7 @@ export async function resumeInterrupted(
       }
       if (typeof agent?.followup !== 'function') {
         ctx.logger?.warn?.(`[supervisor] auto-resume: no live agent available for ${id}`)
+        doLog({ ts: Date.now(), sessionId, kind: 'no-agent', detail: 'agents.resume returned no followup-capable handle' })
         continue
       }
       // Ensure bash tool is registered before followup — initial resume header with
@@ -371,7 +385,14 @@ export async function resumeInterrupted(
       // message instead of the generic "outcome unknown" recovery prompt, then
       // consume the sidecar so it cannot re-trigger on a later resume.
       let resumeMessage = idleMessage
-      try { const intent = doReadIntent(sessionId); if (intent) resumeMessage = `You requested a dsh web restart${intent.reason ? ` (reason: ${intent.reason})` : ''} and it completed. Do NOT call dsh_web_restart again. Verify current state if needed, then continue the original task.` } catch {}
+      let intentReason = ''
+      try {
+        const intent = doReadIntent(sessionId)
+        if (intent) {
+          intentReason = intent.reason ?? ''
+          resumeMessage = `You requested a dsh web restart${intentReason ? ` (reason: ${intentReason})` : ''} and it completed. Do NOT call dsh_web_restart again. Verify current state if needed, then continue the original task.`
+        }
+      } catch {}
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: resumeMessage }],
         source: { kind: 'user' },
@@ -379,6 +400,12 @@ export async function resumeInterrupted(
       try { if (resumeMessage !== idleMessage) doConsumeIntent(sessionId) } catch {}
       resumed.push(id)
       ctx.logger?.info?.(`[supervisor] auto-resume: sent recovery continue for ${id}`)
+      doLog({
+        ts: Date.now(),
+        sessionId,
+        kind: 'resumed',
+        detail: resumeMessage === idleMessage ? 'idle-recovery-prompt' : `restart-intent:${intentReason.slice(0, 100)}`,
+      })
       // C1 observability probe — snapshot the resumed session's SCOPED tool
       // view at the success point so a post-resume bash loss surfaces in the
       // journal the moment it happens (Part D reads this line). Defensive:
@@ -402,6 +429,7 @@ export async function resumeInterrupted(
       } catch {}
     } catch (e: any) {
       ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
+      doLog({ ts: Date.now(), sessionId: String(id).split('/').pop() ?? String(id), kind: 'resume-failed', error: e?.message ?? String(e) })
     }
   }
   return resumed

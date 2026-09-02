@@ -7,6 +7,7 @@
  */
 import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js';
 import type { RestartIntent } from './intents.js';
+import { type ResumeLogEntry } from './resume-log.js';
 import { runSessionHealthCheck } from './session-health.js';
 export * from './resume-tools.js';
 export declare const inject: readonly ["sessions", "agents", "connection", "tools", "skills"];
@@ -69,6 +70,7 @@ export declare function runAutoResume(ctx: any, opts?: {
     findInterrupted?: typeof defaultFindInterrupted;
     findDanglingOpenTurns?: typeof defaultFindDanglingOpenTurns;
     resumeInterrupted?: typeof resumeInterrupted;
+    logResume?: (entry: ResumeLogEntry) => void;
     config?: SupervisorPluginConfig;
 }): Promise<void>;
 export declare function resumeInterrupted(ctx: any, ids: string[], deps?: {
@@ -78,6 +80,7 @@ export declare function resumeInterrupted(ctx: any, ids: string[], deps?: {
     resolveToolScope?: ToolScopeResolver;
     notify?: (line: string) => Promise<void>;
     injectSessionMessage?: (sessionId: string, content: string) => unknown;
+    logResume?: (entry: ResumeLogEntry) => void;
     config?: SupervisorPluginConfig;
 }): Promise<string[]>;
 export declare function createResumeRpcHandler(ctx: any, opts?: {
