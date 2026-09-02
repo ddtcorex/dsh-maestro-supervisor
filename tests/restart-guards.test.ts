@@ -177,3 +177,29 @@ describe('restart-dsh-web.sh pre-flight', () => {
     expect(guard).not.toMatch(/\bexit\s+[0-9]+/)
   })
 })
+
+describe('restart-dsh-web.sh port topology (local-pin-gate)', () => {
+  const script = readFileSync(restartScriptPath, 'utf8')
+
+  it('detects the dsh-web process on the new topology ports 3080/3081/3082 too', () => {
+    expect(script).toContain("':(3000|3080|3081|3082)(")
+    expect(script).not.toContain("':(3000|3080)(")
+  })
+
+  it('checks all topology ports are free before the fresh boot', () => {
+    const loop = /for port in [^\n]+/m.exec(script)?.[0] ?? ''
+    expect(loop).toContain('3000')
+    expect(loop).toContain('3080')
+    expect(loop).toContain('3081')
+    expect(loop).toContain('3082')
+  })
+
+  it('accepts the PIN-proxy / raw-webserver health surfaces (200/401/303)', () => {
+    // :3080 is the maestro PIN proxy (303 -> login flow, 200 when authed)
+    // :3082 is the raw webserver under the local-pin-gate topology.
+    expect(script).toMatch(/code_3080=.*3080/)
+    expect(script).toMatch(/code_3082=.*3082/)
+    expect(script).toMatch(/"\$code_3080" == 200 \|\| "\$code_3080" == 401 \|\| "\$code_3080" == 303/)
+    expect(script).toMatch(/"\$code_3082" == 200 \|\| "\$code_3082" == 401/)
+  })
+})

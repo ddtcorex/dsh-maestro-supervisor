@@ -112,8 +112,8 @@ for command in ss ps grep sort; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 
-listener_pids="$({ ss -tlnp 2>/dev/null || true; } | grep -E ':(3000|3080)([[:space:]]|$)' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
-[[ -n "$listener_pids" ]] || fail 'no listeners found on ports 3000 or 3080'
+listener_pids="$({ ss -tlnp 2>/dev/null || true; } | grep -E ':(3000|3080|3081|3082)([[:space:]]|$)' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+[[ -n "$listener_pids" ]] || fail 'no listeners found on ports 3000/3080 (proxy) or 3081/3082 (local-pin-gate topology)'
 
 resolve_tree() {
   local current="$1"
@@ -250,7 +250,7 @@ else
   fi
 fi
 
-for port in 3000 3080; do
+for port in 3000 3080 3081 3082; do
   if ss -tln 2>/dev/null | grep -q ":$port "; then
     fail "port $port remains held; refusing to double-boot"
   fi
@@ -287,12 +287,20 @@ fi
 for _ in $(seq 1 90); do
   # 401 is healthy: dsh-web is up but requires the browser token (matches
   # dsh-web-supervisor's own health-poller convention since DSH 0.1.2).
-  code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/ || true)"
-  if [[ "$code" == 200 || "$code" == 401 ]]; then
-    printf '[restart] DSH Web is serving HTTP %s on port 3080\n' "$code"
+  # Under the local-pin-gate topology (2026-09-02) :3080 is the maestro PIN
+  # proxy (303 -> login / 200 authed) and the raw webserver lives on :3082 —
+  # accept any dsh-web surface that answers 200/401/303.
+  code_3080="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/ || true)"
+  if [[ "$code_3080" == 200 || "$code_3080" == 401 || "$code_3080" == 303 ]]; then
+    printf '[restart] DSH Web is serving HTTP %s on port 3080\n' "$code_3080"
+    exit 0
+  fi
+  code_3082="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3082/ || true)"
+  if [[ "$code_3082" == 200 || "$code_3082" == 401 ]]; then
+    printf '[restart] DSH Web raw webserver is serving HTTP %s on port 3082\n' "$code_3082"
     exit 0
   fi
   sleep 1
 done
 
-fail 'DSH Web did not serve HTTP 200/401 on port 3080 before timeout'
+fail 'DSH Web did not serve HTTP 200/401/303 on :3080 (PIN proxy) or :3082 (raw webserver) before timeout'
