@@ -1,5 +1,6 @@
 import type { HealthState } from './health-poller.js';
 import type { RestartRequest } from './restart-guards.js';
+import { type MintCookieOpts } from './dsh-session.js';
 export interface SupervisorDeps {
     pollHealth: () => Promise<HealthState>;
     writeLKG: () => Promise<{
@@ -45,7 +46,17 @@ export interface SupervisorDeps {
     readRestartRequest?: () => RestartRequest | undefined;
     onRestartRequestHandled?: (req: RestartRequest) => void;
 }
-export declare function resumeViaRpc(ids: string[], fetchFn?: (url: string, init: RequestInit) => Promise<Response>): Promise<{
+export declare function resumeViaRpc(ids: string[], fetchFn?: (url: string, init: RequestInit) => Promise<Response>, extraHeaders?: Record<string, string>): Promise<{
+    resumed: string[];
+}>;
+/**
+ * Daemon default resume path: mint the `dsh-auth-*` session cookie first (the
+ * `/resume` RPC sits behind the raw webserver's browser-trust fence, which 401s
+ * cookie-less loopback calls since the local-pin-gate topology moved the
+ * webserver behind the PIN proxies) and attach it to the POST. Falls back to an
+ * unauthenticated POST when no boot token is readable — old behavior preserved.
+ */
+export declare function resumeViaRpcWithSession(ids: string[], fetchFn?: (url: string, init: RequestInit) => Promise<Response>, opts?: MintCookieOpts): Promise<{
     resumed: string[];
 }>;
 export declare class Supervisor {
