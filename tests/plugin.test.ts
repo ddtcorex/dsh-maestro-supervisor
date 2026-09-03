@@ -55,7 +55,10 @@ describe('resumeInterrupted', () => {
     const followup = vi.fn()
     const persistence = {
       load: async () => ({
-        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        events: [
+          { type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } },
+          { type: 'turn/end', data: { reason: { kind: 'interrupted' } } },
+        ],
         meta: { agentPreset: 'default' },
       }),
     }
@@ -67,7 +70,10 @@ describe('resumeInterrupted', () => {
     })
     await resumeInterrupted(ctx, ['proj/session-abc'])
     expect(resumeAgent).toHaveBeenCalledTimes(1)
-    expect(resumeAgent).toHaveBeenCalledWith({ resumeSessionId: 'session-abc' })
+    expect(resumeAgent).toHaveBeenCalledWith({
+      resumeSessionId: 'session-abc',
+      agentOptions: { provider: 'example-provider', model: 'example-model' },
+    })
     expect(followup).toHaveBeenCalledTimes(1)
     const sentMessage = followup.mock.calls[0][0]
     // Recovery prompt must mention interruption + bash verification (repair.ts:104 TOOL_OUTCOME_UNKNOWN)
@@ -76,6 +82,59 @@ describe('resumeInterrupted', () => {
     expect(sentMessage.content[0].text).toContain('TOOL_OUTCOME_UNKNOWN')
     expect(sentMessage.source).toEqual({ kind: 'user' })
     expect(ctx._logs.some((l: string) => l.includes('sent recovery continue'))).toBe(true)
+  })
+
+  it('skips resume when provider/model cannot be recovered (avoids {{model}} persona crash)', async () => {
+    const resumeAgent = vi.fn(async () => ({ agent: { followup: vi.fn() } }))
+    const ctx = makeCtx({
+      sessionPersistence: {
+        load: async () => ({
+          events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        }),
+      },
+      agents: { get: () => undefined, resume: resumeAgent },
+    })
+    const entries: any[] = []
+    await expect(
+      resumeInterrupted(ctx, ['proj/session-abc'], { logResume: (e: any) => entries.push(e) }),
+    ).resolves.toEqual([])
+    expect(resumeAgent).not.toHaveBeenCalled()
+    const failed = entries.find((e) => e.kind === 'resume-failed')
+    expect(failed).toBeDefined()
+    expect(failed.sessionId).toBe('session-abc')
+    expect(String(failed.error)).toContain('provider/model')
+  })
+
+  it('skips resume when only a partial route is recovered (provider without model)', async () => {
+    const resumeAgent = vi.fn(async () => ({ agent: { followup: vi.fn() } }))
+    const ctx = makeCtx({
+      sessionPersistence: {
+        load: async () => ({
+          events: [{ type: 'request/context', data: { provider: 'example-provider' } }],
+        }),
+      },
+      agents: { get: () => undefined, resume: resumeAgent },
+    })
+    const entries: any[] = []
+    await expect(
+      resumeInterrupted(ctx, ['proj/session-abc'], { logResume: (e: any) => entries.push(e) }),
+    ).resolves.toEqual([])
+    expect(resumeAgent).not.toHaveBeenCalled()
+    expect(entries.some((e) => e.kind === 'resume-failed')).toBe(true)
+  })
+
+  it('still sends followup to an already-live agent without requiring a persisted route', async () => {
+    const followup = vi.fn()
+    const resumeAgent = vi.fn()
+    const ctx = makeCtx({
+      sessionPersistence: {
+        load: async () => { throw new Error('disk error') },
+      },
+      agents: { get: () => ({ followup }), resume: resumeAgent },
+    })
+    await expect(resumeInterrupted(ctx, ['proj/abc-123'])).resolves.toEqual(['proj/abc-123'])
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(resumeAgent).not.toHaveBeenCalled()
   })
 
   it('restores the persisted provider and model when resuming an agent', async () => {
@@ -99,7 +158,10 @@ describe('resumeInterrupted', () => {
   it('does not throw when the agent handle has no followup method', async () => {
     const persistence = {
       load: async () => ({
-        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        events: [
+          { type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } },
+          { type: 'turn/end', data: { reason: { kind: 'interrupted' } } },
+        ],
         meta: { agentPreset: 'default' },
       }),
     }
@@ -114,7 +176,10 @@ describe('resumeInterrupted', () => {
   it('does not throw when agents.create rejects', async () => {
     const persistence = {
       load: async () => ({
-        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        events: [
+          { type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } },
+          { type: 'turn/end', data: { reason: { kind: 'interrupted' } } },
+        ],
         meta: { agentPreset: 'default' },
       }),
     }
@@ -130,7 +195,10 @@ describe('resumeInterrupted', () => {
   it('writes an out-of-band resume-failed log entry when agents.resume throws', async () => {
     const persistence = {
       load: async () => ({
-        events: [{ type: 'turn/end', data: { reason: { kind: 'interrupted' } } }],
+        events: [
+          { type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } },
+          { type: 'turn/end', data: { reason: { kind: 'interrupted' } } },
+        ],
         meta: { agentPreset: 'default' },
       }),
     }

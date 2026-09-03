@@ -332,9 +332,19 @@ export async function resumeInterrupted(
         } catch (e: any) {
           ctx.logger?.warn?.(`[supervisor] auto-resume: could not recover route for ${id}: ${e?.message ?? String(e)}`)
         }
+        if (agentOptions === undefined) {
+          // Resuming without a provider/model builds an agent whose
+          // {{model}} persona variable has no value, so the very next turn
+          // fails with `prompt variable "{{model}}" has no value for this
+          // assembly (section "deployment:persona")`. Skip corrupt/routeless
+          // sessions instead of triggering a continue that can only fail.
+          ctx.logger?.warn?.(`[supervisor] auto-resume: skipping ${id} — no provider/model recovered (corrupt or routeless session)`)
+          doLog({ ts: Date.now(), sessionId, kind: 'resume-failed', error: 'missing provider/model: persistence has no request/context route — skipping corrupt/routeless session' })
+          continue
+        }
         const handle = await agents?.resume?.({
           resumeSessionId: sid,
-          ...(agentOptions === undefined ? {} : { agentOptions }),
+          agentOptions,
         })
         agent = handle?.agent
         if (agent !== undefined) ctx.logger?.info?.(`[supervisor] auto-resume: re-attached agent for ${id}`)
