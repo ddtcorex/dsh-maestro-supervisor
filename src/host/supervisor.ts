@@ -242,7 +242,7 @@ export class Supervisor {
       const cfg = await readSupervisorConfig()
       if (typeof (cfg as any).intervalMs === 'number' && (cfg as any).intervalMs > 0) return (cfg as any).intervalMs
     } catch {}
-    return 3000
+    return 5000
   }
 
   private async getEffectiveDownThreshold(): Promise<number> {
@@ -251,7 +251,23 @@ export class Supervisor {
       const cfg = await readSupervisorConfig()
       if (typeof (cfg as any).downThreshold === 'number' && (cfg as any).downThreshold > 0) return (cfg as any).downThreshold
     } catch {}
+    return 6
+  }
+
+  private async getEffectiveDegradedThreshold(): Promise<number> {
+    try {
+      const cfg = await readSupervisorConfig()
+      if (typeof (cfg as any).degradedThreshold === 'number' && (cfg as any).degradedThreshold > 0) return (cfg as any).degradedThreshold
+    } catch {}
     return 5
+  }
+
+  private async getEffectivePollTimeoutMs(): Promise<number> {
+    try {
+      const cfg = await readSupervisorConfig()
+      if (typeof (cfg as any).pollTimeoutMs === 'number' && (cfg as any).pollTimeoutMs > 0) return (cfg as any).pollTimeoutMs
+    } catch {}
+    return 20000
   }
 
   private async findInterruptedRecent(withinMs?: number): Promise<{ scanned: number; interrupted: string[] }> {
@@ -392,8 +408,8 @@ export class Supervisor {
         if (planned) { this.consecutiveDegraded = 0; return }
       }
       const now = this.deps.getTime ? this.deps.getTime() : Date.now()
-      // degraded needs 3 consecutive (not downThreshold which tests set to 1) to avoid flapping
-      const degradedThreshold = 3
+      // degraded needs consecutive hits to avoid flapping — Option A 2026-09-03: 3→5 (via config)
+      const degradedThreshold = await this.getEffectiveDegradedThreshold()
       this.consecutiveDegraded++
       if (this.consecutiveDegraded < degradedThreshold) {
         if (now - this.lastDegradedNotify < 60000) return
