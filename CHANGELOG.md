@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.8] - 2026-09-03
+
+### Fixed
+
+- **Configurable degraded/down thresholds** — high load (loadavg ~12 from docker +
+  horizon) made the 3s health poll read short fetch stalls as degraded and
+  self-restart dsh web needlessly. Health fetch timeout 12s→20s, poll interval
+  3s→5s, down threshold 5→6, degraded threshold 3→5; all four are now readable
+  from supervisor config (`intervalMs`, `downThreshold`, `degradedThreshold`,
+  `pollTimeoutMs`) via `getEffective*` helpers, so tuning needs no code change
+  (#61).
+
+
 ## [0.7.7] - 2026-09-03
 
 ### Fixed
