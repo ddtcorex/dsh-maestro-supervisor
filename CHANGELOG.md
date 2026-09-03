@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.9] - 2026-09-03
+
+### Fixed
+
+- **Resume route recovery via the handle seam** — route recovery called the
+  removed `persistence.load(id)` API (gone since DSH's handle-based
+  persistence seam in 0.1.2-rc.1), so `agentOptions` was always `undefined`
+  and every resumed agent lost its provider/model, failing the next turn
+  with `prompt variable "{{model}}" has no value for this assembly (section
+  "deployment:persona")`. The route is now read through `open(id, 'read')` +
+  `read(0)`, falling back to the first `request/context` line of the raw
+  session log; skip-with-audit remains only for genuinely routeless sessions
+  (#63).
+
 ## [0.7.8] - 2026-09-03
 
 ### Fixed
