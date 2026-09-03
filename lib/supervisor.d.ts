@@ -84,6 +84,8 @@ export declare class Supervisor {
     private getResumeWithinMs;
     private getEffectiveIntervalMs;
     private getEffectiveDownThreshold;
+    private getEffectiveDegradedThreshold;
+    private getEffectivePollTimeoutMs;
     private findInterruptedRecent;
     private collectGitDiff;
     private attemptAutoResume;
