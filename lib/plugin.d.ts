@@ -73,6 +73,27 @@ export declare function runAutoResume(ctx: any, opts?: {
     logResume?: (entry: ResumeLogEntry) => void;
     config?: SupervisorPluginConfig;
 }): Promise<void>;
+export interface RecoveredRoute {
+    provider: string;
+    model: string;
+}
+/**
+ * Recover the provider/model route a resumed agent needs for its
+ * `{{model}}` persona variable: handle seam first, raw session log as
+ * fallback. Returns `undefined` only for genuinely corrupt/routeless
+ * sessions, which the caller skips instead of resuming.
+ */
+export declare function recoverAgentOptions(input: {
+    persistence: any;
+    sid: unknown;
+    sessionsRoot: string;
+    group: string;
+    sessionId: string;
+    logger?: {
+        warn?: (msg: string) => void;
+    };
+    id: string;
+}): Promise<RecoveredRoute | undefined>;
 export declare function resumeInterrupted(ctx: any, ids: string[], deps?: {
     readIntent?: (id: string) => RestartIntent | undefined;
     consumeIntent?: (id: string) => void;

@@ -286,6 +286,99 @@ export async function runAutoResume(
   }
 }
 
+export interface RecoveredRoute {
+  provider: string
+  model: string
+}
+
+function routeFromEvents(events: unknown): RecoveredRoute | undefined {
+  if (!Array.isArray(events)) return undefined
+  const context = [...events].reverse().find((event: any) => event?.type === 'request/context')?.data
+  if (typeof context?.provider === 'string' && typeof context?.model === 'string') {
+    return { provider: context.provider, model: context.model }
+  }
+  return undefined
+}
+
+/**
+ * Route recovery through the handle seam (`open(id, 'read')` + `read(0)`).
+ * A `read` handle never takes ownership, so this works while another handle
+ * or process holds `write`. Replaces the removed `persistence.load(id)`
+ * API (gone since DSH's handle-based persistence seam) — calling `load`
+ * now resolves to `undefined` and every resumed agent would lose its
+ * provider/model.
+ */
+async function readRouteFromHandle(persistence: any, sid: unknown): Promise<RecoveredRoute | undefined> {
+  const handle = await persistence?.open?.(sid, 'read')
+  if (handle === undefined || handle === null) return undefined
+  try {
+    return routeFromEvents(await handle.read(0))
+  } finally {
+    try { await handle.close?.() } catch {}
+  }
+}
+
+/**
+ * Raw-log fallback when the backend cannot open the session: stream the
+ * stored log for the first `request/context` line. `grep -m1` stops at the
+ * first match so huge logs cost one streamed pass, not a full decode.
+ */
+async function readRouteFromRawLog(sessionsRoot: string, group: string, sessionId: string): Promise<RecoveredRoute | undefined> {
+  const zstdPath = path.join(sessionsRoot, group, sessionId, 'session.jsonl.zstd')
+  const jsonlPath = path.join(sessionsRoot, group, sessionId, 'session.jsonl')
+  try {
+    if (fs.existsSync(zstdPath)) {
+      const { execSync } = await import('node:child_process')
+      const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | grep -a -m1 '"type":"request/context"'`, { encoding: 'utf-8' })
+      const line = out.split('\n').find((l) => l.includes('request/context'))
+      if (line !== undefined) {
+        try { return routeFromEvents([JSON.parse(line)]) } catch {}
+      }
+      return undefined
+    }
+    if (fs.existsSync(jsonlPath)) {
+      const content = fs.readFileSync(jsonlPath, 'utf-8')
+      for (const line of content.split('\n')) {
+        if (!line.includes('"request/context"')) continue
+        try {
+          const route = routeFromEvents([JSON.parse(line)])
+          if (route !== undefined) return route
+        } catch {}
+      }
+    }
+  } catch {}
+  return undefined
+}
+
+/**
+ * Recover the provider/model route a resumed agent needs for its
+ * `{{model}}` persona variable: handle seam first, raw session log as
+ * fallback. Returns `undefined` only for genuinely corrupt/routeless
+ * sessions, which the caller skips instead of resuming.
+ */
+export async function recoverAgentOptions(input: {
+  persistence: any
+  sid: unknown
+  sessionsRoot: string
+  group: string
+  sessionId: string
+  logger?: { warn?: (msg: string) => void }
+  id: string
+}): Promise<RecoveredRoute | undefined> {
+  try {
+    const viaHandle = await readRouteFromHandle(input.persistence, input.sid)
+    if (viaHandle !== undefined) return viaHandle
+  } catch (e: any) {
+    input.logger?.warn?.(`[supervisor] auto-resume: could not recover route for ${input.id}: ${e?.message ?? String(e)}`)
+  }
+  try {
+    return await readRouteFromRawLog(input.sessionsRoot, input.group, input.sessionId)
+  } catch (e: any) {
+    input.logger?.warn?.(`[supervisor] auto-resume: could not recover route for ${input.id}: ${e?.message ?? String(e)}`)
+    return undefined
+  }
+}
+
 export async function resumeInterrupted(
   ctx: any,
   ids: string[],
@@ -320,18 +413,9 @@ export async function resumeInterrupted(
         const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
         const sid = SessionId ? SessionId(sessionId) : sessionId
         const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
-        let agentOptions: { provider: string; model: string } | undefined
-        try {
-          const loaded = await persistence?.load?.(sessionId)
-          const context = Array.isArray(loaded?.events)
-            ? [...loaded.events].reverse().find((event: any) => event?.type === 'request/context')?.data
-            : undefined
-          if (typeof context?.provider === 'string' && typeof context?.model === 'string') {
-            agentOptions = { provider: context.provider, model: context.model }
-          }
-        } catch (e: any) {
-          ctx.logger?.warn?.(`[supervisor] auto-resume: could not recover route for ${id}: ${e?.message ?? String(e)}`)
-        }
+        const sessionsRoot = deps.config?.sessionLogRoot ?? path.join(os.homedir(), '.dsh', 'sessions')
+        const group = id.slice(0, Math.max(0, id.length - sessionId.length - 1))
+        const agentOptions = await recoverAgentOptions({ persistence, sid, sessionsRoot, group, sessionId, logger: ctx.logger, id })
         if (agentOptions === undefined) {
           // Resuming without a provider/model builds an agent whose
           // {{model}} persona variable has no value, so the very next turn
