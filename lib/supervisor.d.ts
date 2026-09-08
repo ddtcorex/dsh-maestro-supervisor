@@ -1,5 +1,6 @@
 import type { HealthState } from './health-poller.js';
 import type { RestartRequest } from './restart-guards.js';
+import { type RestartOutcome } from './intents.js';
 import { type MintCookieOpts } from './dsh-session.js';
 export interface SupervisorDeps {
     pollHealth: () => Promise<HealthState>;
@@ -45,7 +46,11 @@ export interface SupervisorDeps {
     }>;
     readRestartRequest?: () => RestartRequest | undefined;
     onRestartRequestHandled?: (req: RestartRequest) => void;
+    writeOutcome?: (sessionId: string, outcome: RestartOutcome) => void;
+    listenerPid?: (port: number) => number | undefined;
 }
+/** PID holding a 127.0.0.1 listener on the port, or undefined. Never throws. */
+export declare function defaultListenerPid(port: number): number | undefined;
 export declare function resumeViaRpc(ids: string[], fetchFn?: (url: string, init: RequestInit) => Promise<Response>, extraHeaders?: Record<string, string>): Promise<{
     resumed: string[];
 }>;

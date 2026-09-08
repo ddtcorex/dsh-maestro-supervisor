@@ -11,9 +11,11 @@ export interface RestartRequest {
     ttl: number;
     callerSessionId?: string;
     reason?: string;
+    oldPid?: number;
 }
 export declare function writeRestartRequest(caller: {
     callerSessionId?: string;
     reason?: string;
+    oldPid?: number;
 }, ttlMs?: number): void;
 export declare function readRestartRequest(): RestartRequest | undefined;

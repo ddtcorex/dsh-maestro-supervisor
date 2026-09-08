@@ -24,6 +24,32 @@ import { writeRestartRequest } from './restart-guards.js';
  */
 export declare function copyProfileForDryBoot(srcDir: string, destDir: string): void;
 /**
+ * A dry-boot orphan candidate: a `dsh web` process rooted at a temp DSH_HOME
+ * with an ephemeral-port listener. Ports 3080/3081/3082 are the live tree and
+ * can never be candidates.
+ */
+export interface DryBootCandidate {
+    pid: number;
+    port: number;
+    dshHome: string;
+}
+export interface GcReaders {
+    readProc?: () => Array<{
+        pid: number;
+        cmd: string;
+        env: string;
+    }>;
+    ssPortsOf?: (pid: number) => number[];
+    selfPid?: number;
+}
+/**
+ * List dry-boot orphans: `dsh web` processes on a temp DSH_HOME holding an
+ * ephemeral 9000-9999 listener. Conjunctive fingerprint + absolute exclusions
+ * (self PID, live ports, real-home DSH_HOME) — a process is returned only when
+ * every signal agrees it is a disposable dry-boot.
+ */
+export declare function listDryBootCandidates(readers?: GcReaders): DryBootCandidate[];
+/**
  * Boot a copy of the live web profile on an isolated DSH_HOME and verify the
  * plugin tree loads and serves. Returns ok + a one-line detail for the tool
  * message. The spawned tree is killed (best-effort) and the temp home removed.
@@ -90,4 +116,6 @@ export declare function registerRestartTool(ctx: any, deps?: {
     dryBoot?: typeof dryBootVerify;
     writeRestartRequest?: typeof writeRestartRequest;
     harnessRoot?: string;
+    gcReaders?: GcReaders;
+    killPid?: (pid: number, sig: string) => void;
 }): () => void;
