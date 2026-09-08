@@ -93,9 +93,9 @@ export function clearPlannedRestart(): void {
 // (Task 4) can attribute a restart to the session that requested it. Reuses
 // the same marker path — writePlannedRestart/checkPlannedRestart keep working
 // on {ts, ttl} only, while this adds callerSessionId + reason for later tasks.
-export interface RestartRequest { ts: number; ttl: number; callerSessionId?: string; reason?: string }
+export interface RestartRequest { ts: number; ttl: number; callerSessionId?: string; reason?: string; oldPid?: number }
 
-export function writeRestartRequest(caller: { callerSessionId?: string; reason?: string }, ttlMs = 180_000): void {
+export function writeRestartRequest(caller: { callerSessionId?: string; reason?: string; oldPid?: number }, ttlMs = 180_000): void {
   const p = plannedRestartPath()
   fs.mkdirSync(path.dirname(p), { recursive: true })
   const body: RestartRequest = { ts: Date.now(), ttl: ttlMs, ...caller }
@@ -109,7 +109,7 @@ export function readRestartRequest(): RestartRequest | undefined {
     const j = JSON.parse(raw) as Partial<RestartRequest>
     if (typeof j.ts === 'number' && typeof j.ttl === 'number') {
       if (Date.now() - j.ts >= j.ttl) return undefined
-      return { ts: j.ts, ttl: j.ttl, callerSessionId: j.callerSessionId, reason: j.reason }
+      return { ts: j.ts, ttl: j.ttl, callerSessionId: j.callerSessionId, reason: j.reason, oldPid: j.oldPid }
     }
   } catch {}
   return undefined

@@ -71,7 +71,7 @@ describe('registerRestartTool', () => {
     const result = await tool.execute({ reason: 'plugin fixed' }, {})
     expect(result.ok).toBe(true)
     expect(deps.writeRestartRequest).toHaveBeenCalledWith(
-      { callerSessionId: 'proj/abc', reason: 'plugin fixed' }, expect.any(Number))
+      expect.objectContaining({ callerSessionId: 'proj/abc', reason: 'plugin fixed' }), expect.any(Number))
     expect(result.detail).toMatch(/scheduled/)
     dispose()
   })
@@ -148,7 +148,7 @@ describe('registerRestartTool', () => {
     const result = await t.execute({ pluginChanged: false, reason: 'plugin v2' }, exec)
     expect(result.ok).toBe(true)
     expect(deps.writeRestartRequest).toHaveBeenCalledWith(
-      { callerSessionId: 'proj/s-1', reason: 'plugin v2' }, expect.any(Number))
+      expect.objectContaining({ callerSessionId: 'proj/s-1', reason: 'plugin v2' }), expect.any(Number))
     expect(result.detail).toMatch(/caller proj\/s-1/)
   })
 
@@ -218,7 +218,138 @@ describe('dryBootVerify', () => {
   })
 })
 
-describe('dryBootFailureDetail', () => {  it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
+describe('dsh_web_dryboot', () => {
+  it('runs the dry-boot gate and returns its result without scheduling', async () => {
+    const registered: any[] = []
+    const ctx: any = {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    }
+    const dryBoot = vi.fn(async () => ({ ok: true, detail: 'dry-boot ok' }))
+    const writeRestartRequest = vi.fn()
+    registerRestartTool(ctx, { dryBoot, writeRestartRequest, harnessRoot: '/repo' } as any)
+    const t = registered.find(x => x.name === 'dsh_web_dryboot')
+    expect(t).toBeDefined()
+    const result = await t.execute({ timeoutMs: 5000 }, {})
+    expect(dryBoot).toHaveBeenCalledWith('/repo', { timeoutMs: 5000 })
+    expect(result).toEqual({ ok: true, detail: 'dry-boot ok' })
+    expect(writeRestartRequest).not.toHaveBeenCalled()
+  })
+})
+
+describe('dsh_web_gc', () => {
+  const ORPHAN = { pid: 101, cmd: 'node --import tsx/esm apps/cli/src/bin.ts web --port 9417', env: 'DSH_HOME=/tmp/dsh-dryboot-x\0PATH=/usr/bin' }
+  function makeCtx(registered: any[]) {
+    return {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    } as any
+  }
+  it('previews without killing when confirm is not true', async () => {
+    const registered: any[] = []
+    const killPid = vi.fn()
+    registerRestartTool(makeCtx(registered), {
+      gcReaders: {
+        readProc: () => [ORPHAN],
+        ssPortsOf: () => [9417],
+        selfPid: 1,
+      },
+      killPid,
+    } as any)
+    const t = registered.find(x => x.name === 'dsh_web_gc')
+    expect(t).toBeDefined()
+    const result = await t.execute({}, {})
+    expect(result).toEqual({ killed: [], candidates: [{ pid: 101, port: 9417, dshHome: '/tmp/dsh-dryboot-x' }] })
+    expect(killPid).not.toHaveBeenCalled()
+  })
+  it('kills and verifies absence with confirm:true', async () => {
+    const registered: any[] = []
+    let alive = true
+    const killPid = vi.fn(() => { alive = false })
+    registerRestartTool(makeCtx(registered), {
+      gcReaders: {
+        readProc: () => (alive ? [ORPHAN] : []),
+        ssPortsOf: () => (alive ? [9417] : []),
+        selfPid: 1,
+      },
+      killPid,
+    } as any)
+    const t = registered.find(x => x.name === 'dsh_web_gc')
+    const result = await t.execute({ confirm: true }, {})
+    expect(killPid).toHaveBeenCalledWith(101, 'SIGKILL')
+    expect(result).toEqual({ killed: [101], candidates: [] })
+  })
+  it('never returns the host itself, live-port holders, or real-home processes', async () => {
+    const registered: any[] = []
+    const killPid = vi.fn()
+    registerRestartTool(makeCtx(registered), {
+      gcReaders: {
+        readProc: () => [
+          { pid: 1, cmd: 'node apps/cli/src/bin.ts web', env: 'DSH_HOME=/home/u/.dsh' },
+          { pid: 102, cmd: 'node --import tsx/esm apps/cli/src/bin.ts web', env: 'DSH_HOME=/tmp/dsh-dryboot-y' },
+          { pid: 103, cmd: 'node --import tsx/esm apps/cli/src/bin.ts web', env: 'DSH_HOME=/home/u/.dsh' },
+        ],
+        ssPortsOf: (pid: number) => (pid === 102 ? [3080] : pid === 103 ? [9418] : [3082]),
+        selfPid: 1,
+      },
+      killPid,
+    } as any)
+    const t = registered.find(x => x.name === 'dsh_web_gc')
+    const result = await t.execute({ confirm: true }, {})
+    expect(result).toEqual({ killed: [], candidates: [] })
+    expect(killPid).not.toHaveBeenCalled()
+  })
+})
+
+describe('dsh_web_restart evidence', () => {
+  it('returns oldPid + intentPath and carries oldPid in the marker', async () => {
+    const registered: any[] = []
+    const ctx: any = {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    }
+    const writeRestartRequest = vi.fn()
+    const deps = { sessionIdOf: () => 'proj/abc', writeRestartRequest }
+    registerRestartTool(ctx, deps as any)
+    const t = registered.find(x => x.name === 'dsh_web_restart')
+    const result = await t.execute({ reason: 'x' }, {})
+    expect(result.oldPid).toBe(process.pid)
+    expect(result.intentPath).toContain('intents')
+    expect(writeRestartRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ oldPid: process.pid }), expect.any(Number))
+  })
+})
+
+describe('dsh_web_restart_status', () => {
+  function makeCtx(registered: any[]) {
+    return {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    } as any
+  }
+  it('reports pending before the outcome lands and ok after', async () => {
+    const registered: any[] = []
+    registerRestartTool(makeCtx(registered), { sessionIdOf: () => 'proj/a' } as any)
+    const t = registered.find(x => x.name === 'dsh_web_restart_status')
+    expect(t).toBeDefined()
+    expect(await t.execute({}, {})).toEqual({ state: 'none', detail: 'no restart scheduled for this session' })
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    const { intentPath } = await import('../src/host/intents.js')
+    mkdirSync(join(intentPath('proj/a'), '..'), { recursive: true })
+    writeFileSync(intentPath('proj/a'), JSON.stringify({ ts: 1, sessionId: 'proj/a', reason: 'r' }), 'utf8')
+    expect(await t.execute({}, {})).toEqual({ state: 'pending', detail: 'restart scheduled, daemon has not reported back yet' })
+    const { writeRestartOutcome } = await import('../src/host/intents.js')
+    writeRestartOutcome('proj/a', { state: 'ok', oldPid: 11, newPid: 22, httpStatus: 200, swappedAt: 3 })
+    expect(await t.execute({}, {})).toEqual({ state: 'ok', oldPid: 11, newPid: 22, httpStatus: 200, swappedAt: 3 })
+  })
+})
+
+describe('dryBootFailureDetail', () => {
+  it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
     const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
     const tail = [
       'node:internal/modules/esm/loader',
