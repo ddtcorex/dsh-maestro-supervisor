@@ -62,6 +62,36 @@ the append-only log destination. The helper refuses a real swap without
 and refuses to launch if ports are still occupied. `--dry-run` never runs
 `kill` or `setsid`.
 
+## In-session validation without restart
+
+In-session agents have three tools (same row as `dsh_web_restart`) that never
+touch the live process:
+
+- `dsh_web_dryboot` (`{ timeoutMs? }`) — boots a copy of the live profile on an
+  ephemeral port with an isolated `DSH_HOME` and returns `{ ok, detail }`.
+  Prefer this over hand-rolled `cp -r` + spawn: the copy repairs relative
+  `link:` symlinks and the child is always killed with the temp home removed.
+- `dsh_web_gc` (`{ confirm? }`) — lists orphaned dry-boot processes
+  (`DSH_HOME=/tmp/dsh-dryboot-*` + ephemeral listener, never self / live ports
+  / real-home processes). Default returns the preview list; `confirm:true`
+  SIGKILLs and verifies absence.
+- `dsh_web_restart_status` (no params) — reads the calling session's restart
+  outcome: `pending` until the daemon swaps, then `ok`/`failed` with
+  `oldPid`/`newPid`/`httpStatus`. `dsh_web_restart` itself now returns
+  `{ ok, detail, oldPid, intentPath }` — quote all four when reporting.
+
+Settings-staging rule: config-lib memoizes settings per process, so an
+out-of-band settings edit is invisible to the host until restart. Stage ALL
+such edits, then restart ONCE. Prefer in-host Settings UI saves — they are
+visible immediately with no restart at all.
+
+TLS note for plugin authors: Node/undici reads `NODE_EXTRA_CA_CERTS` from the
+birth environment only; assigning it at runtime is silently ignored. The
+durable path for a local CA (e.g. a Govard/Caddy dev CA) is a systemd user
+drop-in (`~/.config/systemd/user/dsh-web.service.d/*.conf` with
+`Environment=NODE_EXTRA_CA_CERTS=<path>`), followed by a daemon reload and a
+host restart.
+
 ## Post-swap checks
 
 Do not read the top of an old append-only log as liveness evidence. Instead:
