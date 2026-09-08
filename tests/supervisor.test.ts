@@ -39,6 +39,28 @@ describe('supervisor', () => {
     expect(notify).not.toHaveBeenCalledWith(expect.stringContaining('auto-resuming'))
   })
 
+  it('writes the restart outcome once the supervised boot is healthy', async () => {
+    const writeOutcome = vi.fn()
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: true, httpCode: 200 }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: vi.fn(async () => {}),
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      writeOutcome,
+      listenerPid: () => 22,
+      getTime: () => 999,
+    } as any)
+    ;(s as any).awaitingHealthyBoot = true
+    ;(s as any).pendingRestartRequest = { callerSessionId: 'proj/a', oldPid: 11 }
+    await s.tick()
+    expect(writeOutcome).toHaveBeenCalledWith('proj/a', {
+      state: 'ok', oldPid: 11, newPid: 22, httpStatus: 200, swappedAt: 999,
+    })
+  })
+
   it('writes LKG when healthy', async () => {
     const writeLKG = vi.fn(async () => ({ ts: '2026-08-27T00-00-00-000Z', manifest: { ts: '', files: [] } as any }))
     const s = new Supervisor({

@@ -8,6 +8,8 @@ import { resolveHarnessRoot } from './paths.js'
 import { readSupervisorConfig } from './config.js'
 import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart, clearPlannedRestart, PLANNED_RESTART_TTL_MS } from './restart-guards.js'
 import type { RestartRequest } from './restart-guards.js'
+import { writeRestartOutcome as defaultWriteOutcome, type RestartOutcome } from './intents.js'
+import { execFileSync } from 'node:child_process'
 import { mintDshSessionCookie, type MintCookieOpts } from './dsh-session.js'
 import { buildKillStalePortsCommand } from './restart-guards.js'
 
@@ -51,6 +53,23 @@ export interface SupervisorDeps {
   // once (single-flight per marker), notifies, then clears the marker.
   readRestartRequest?: () => RestartRequest | undefined
   onRestartRequestHandled?: (req: RestartRequest) => void
+  // Outcome sink for supervised restarts (intents.ts sidecar); injectable so
+  // tick() tests never touch the real ~/.dsh.
+  writeOutcome?: (sessionId: string, outcome: RestartOutcome) => void
+  // PID of the process listening on a port (ss parse); injectable for tests.
+  listenerPid?: (port: number) => number | undefined
+}
+
+/** PID holding a 127.0.0.1 listener on the port, or undefined. Never throws. */
+export function defaultListenerPid(port: number): number | undefined {
+  try {
+    const out = execFileSync('ss', ['-tlnp'], { encoding: 'utf8' })
+    for (const line of out.split('\n')) {
+      const m = new RegExp(`127\\.0\\.0\\.1:${port}\\s[^]*?pid=(\\d+)`).exec(line)
+      if (m) return Number(m[1])
+    }
+  } catch {}
+  return undefined
 }
 
 export async function resumeViaRpc(
@@ -379,6 +398,16 @@ export class Supervisor {
             await this.deps.notify(`restarted dsh-web after self-restart by session ${restartReq.callerSessionId}`)
           } catch (e: any) {
             await this.deps.notify(`self-restart dsh-web failed: ${e?.message ?? String(e)}`).catch(() => {})
+            if (restartReq.callerSessionId) {
+              try {
+                ;(this.deps.writeOutcome ?? defaultWriteOutcome)(restartReq.callerSessionId, {
+                state: 'failed',
+                oldPid: restartReq.oldPid,
+                swappedAt: this.deps.getTime ? this.deps.getTime() : Date.now(),
+                error: e?.message ?? String(e),
+              })
+            } catch {}
+            }
           } finally {
             // Hold the marker and latch until health.up: clearing here would
             // drop crash suppression mid-restart, and re-arming here would let
@@ -482,6 +511,18 @@ export class Supervisor {
         if (cleared) this.restartRequestHandled = false
         if (req) {
           try { this.deps.onRestartRequestHandled?.(req) } catch {}
+          if (req.callerSessionId) {
+            try {
+              const listen = this.deps.listenerPid ?? defaultListenerPid
+              ;(this.deps.writeOutcome ?? defaultWriteOutcome)(req.callerSessionId, {
+                state: 'ok',
+                oldPid: req.oldPid,
+                newPid: listen(3082),
+                httpStatus: (health as any)?.httpCode ?? 200,
+                swappedAt: this.deps.getTime ? this.deps.getTime() : Date.now(),
+              })
+            } catch {}
+          }
         }
       }
       // Throttle LKG writes to at most once per 5 minutes
