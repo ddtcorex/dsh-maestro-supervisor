@@ -16,7 +16,7 @@
 import { join, dirname, resolve } from 'node:path'
 import { mkdtempSync, rmSync, cpSync, existsSync, readFileSync, readdirSync, statSync, lstatSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { writeRestartRequest } from './restart-guards.js'
 
@@ -50,6 +50,74 @@ export function copyProfileForDryBoot(srcDir: string, destDir: string): void {
     }
   }
   repair(destDir, '')
+}
+
+/**
+ * A dry-boot orphan candidate: a `dsh web` process rooted at a temp DSH_HOME
+ * with an ephemeral-port listener. Ports 3080/3081/3082 are the live tree and
+ * can never be candidates.
+ */
+export interface DryBootCandidate { pid: number; port: number; dshHome: string }
+
+const LIVE_PORTS = new Set([3080, 3081, 3082])
+
+export interface GcReaders {
+  readProc?: () => Array<{ pid: number; cmd: string; env: string }>
+  ssPortsOf?: (pid: number) => number[]
+  selfPid?: number
+}
+
+function defaultReadProc(): Array<{ pid: number; cmd: string; env: string }> {
+  const out: Array<{ pid: number; cmd: string; env: string }> = []
+  let names: string[] = []
+  try { names = readdirSync('/proc') } catch { return out }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue
+    try {
+      const cmd = readFileSync(`/proc/${name}/cmdline`, 'utf8').replace(/\0/g, ' ')
+      const env = readFileSync(`/proc/${name}/environ`, 'utf8')
+      out.push({ pid: Number(name), cmd, env })
+    } catch { /* process exited mid-scan — ignore */ }
+  }
+  return out
+}
+
+function defaultSsPortsOf(pid: number): number[] {
+  try {
+    const out = execFileSync('ss', ['-tlnp'], { encoding: 'utf8' })
+    const ports: number[] = []
+    for (const line of out.split('\n')) {
+      if (!line.includes(`pid=${pid},`)) continue
+      const m = /:(\d+)\s/.exec(line)
+      if (m) ports.push(Number(m[1]))
+    }
+    return ports
+  } catch { return [] }
+}
+
+/**
+ * List dry-boot orphans: `dsh web` processes on a temp DSH_HOME holding an
+ * ephemeral 9000-9999 listener. Conjunctive fingerprint + absolute exclusions
+ * (self PID, live ports, real-home DSH_HOME) — a process is returned only when
+ * every signal agrees it is a disposable dry-boot.
+ */
+export function listDryBootCandidates(readers: GcReaders = {}): DryBootCandidate[] {
+  const readProc = readers.readProc ?? defaultReadProc
+  const ssPortsOf = readers.ssPortsOf ?? defaultSsPortsOf
+  const selfPid = readers.selfPid ?? process.pid
+  const out: DryBootCandidate[] = []
+  for (const p of readProc()) {
+    if (p.pid === selfPid) continue
+    if (!/bin\.ts web/.test(p.cmd)) continue
+    const home = /^DSH_HOME=([^\0]*)/m.exec(p.env)?.[1] ?? ''
+    if (!home.startsWith(join(tmpdir(), 'dsh-dryboot-'))) continue
+    const ports = ssPortsOf(p.pid)
+    if (ports.some(port => LIVE_PORTS.has(port))) continue
+    const eph = ports.filter(port => port >= 9000 && port <= 9999)
+    if (eph.length === 0) continue
+    out.push({ pid: p.pid, port: eph[0], dshHome: home })
+  }
+  return out
 }
 
 /**
@@ -220,12 +288,15 @@ export function registerRestartTool(ctx: any, deps: {
   dryBoot?: typeof dryBootVerify
   writeRestartRequest?: typeof writeRestartRequest
   harnessRoot?: string
+  gcReaders?: GcReaders
+  killPid?: (pid: number, sig: string) => void
 } = {}): () => void {
   const doDryBoot = deps.dryBoot ?? dryBootVerify
   const doWrite = deps.writeRestartRequest ?? writeRestartRequest
   const doSessionId = deps.sessionIdOf ?? currentSessionId
   let dispose: (() => void) | undefined
   let disposeDryboot: (() => void) | undefined
+  let disposeGc: (() => void) | undefined
   try {
     dispose = ctx.tools.register({
       name: 'dsh_web_restart',
@@ -288,9 +359,47 @@ export function registerRestartTool(ctx: any, deps: {
   } catch (e: any) {
     try { ctx.logger?.warn?.(`[supervisor] dsh_web_dryboot tool failed: ${e?.message ?? String(e)}`) } catch {}
   }
+  try {
+    const doKill = deps.killPid ?? ((pid: number, sig: string) => process.kill(pid, sig as NodeJS.Signals))
+    disposeGc = ctx.tools.register({
+      name: 'dsh_web_gc',
+      description: 'Reap orphaned dry-boot dsh web processes (temp DSH_HOME + ephemeral port). Preview-first: returns candidates without killing unless confirm:true.',
+      parameters: {
+        type: 'object',
+        properties: {
+          confirm: { type: 'boolean', description: 'Actually SIGKILL the candidates and verify they are gone.' },
+        },
+        additionalProperties: false,
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true, properties: { killed: { type: 'array' }, candidates: { type: 'array' } } },
+        render: (_args: any, value: any) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      execute: async (args: any) => {
+        // INVARIANT: kill only conjunctive-fingerprint dry-boots (temp DSH_HOME
+        // + ephemeral listener), never self / live ports / real-home processes.
+        // Preview is the default; killing requires explicit confirm:true.
+        const found = listDryBootCandidates(deps.gcReaders)
+        if (args.confirm !== true) return { killed: [], candidates: found }
+        const killed: number[] = []
+        for (const c of found) {
+          try { doKill(c.pid, 'SIGKILL') } catch {}
+        }
+        const remaining = listDryBootCandidates(deps.gcReaders)
+        const alive = new Set(remaining.map(c => c.pid))
+        for (const c of found) {
+          if (!alive.has(c.pid)) killed.push(c.pid)
+        }
+        return { killed, candidates: remaining }
+      },
+    })
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] dsh_web_gc tool failed: ${e?.message ?? String(e)}`) } catch {}
+  }
   return () => {
     try { if (typeof dispose === 'function') dispose() } catch {}
     try { if (typeof disposeDryboot === 'function') disposeDryboot() } catch {}
+    try { if (typeof disposeGc === 'function') disposeGc() } catch {}
   }
 }
 
