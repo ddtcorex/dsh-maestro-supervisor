@@ -14,6 +14,16 @@
  */
 import { writeRestartRequest } from './restart-guards.js';
 /**
+ * Copy a live profile tree for an isolated dry-boot. A naive recursive copy
+ * breaks `link:` installs: their node_modules entries are relative symlinks
+ * (e.g. `../../../shared/pkg`) that resolve against the copy location and
+ * dangle. Every symlink left dangling by the copy is rewritten to the
+ * absolute live target it pointed at, so the dry-boot loads the same code
+ * the live tree loads. Links already broken in the live tree are left alone
+ * (the dry-boot must stay faithful, not fix the live tree).
+ */
+export declare function copyProfileForDryBoot(srcDir: string, destDir: string): void;
+/**
  * Boot a copy of the live web profile on an isolated DSH_HOME and verify the
  * plugin tree loads and serves. Returns ok + a one-line detail for the tool
  * message. The spawned tree is killed (best-effort) and the temp home removed.
