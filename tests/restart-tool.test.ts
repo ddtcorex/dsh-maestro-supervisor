@@ -323,6 +323,31 @@ describe('dsh_web_restart evidence', () => {
   })
 })
 
+describe('dsh_web_restart_status', () => {
+  function makeCtx(registered: any[]) {
+    return {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    } as any
+  }
+  it('reports pending before the outcome lands and ok after', async () => {
+    const registered: any[] = []
+    registerRestartTool(makeCtx(registered), { sessionIdOf: () => 'proj/a' } as any)
+    const t = registered.find(x => x.name === 'dsh_web_restart_status')
+    expect(t).toBeDefined()
+    expect(await t.execute({}, {})).toEqual({ state: 'none', detail: 'no restart scheduled for this session' })
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    const { intentPath } = await import('../src/host/intents.js')
+    mkdirSync(join(intentPath('proj/a'), '..'), { recursive: true })
+    writeFileSync(intentPath('proj/a'), JSON.stringify({ ts: 1, sessionId: 'proj/a', reason: 'r' }), 'utf8')
+    expect(await t.execute({}, {})).toEqual({ state: 'pending', detail: 'restart scheduled, daemon has not reported back yet' })
+    const { writeRestartOutcome } = await import('../src/host/intents.js')
+    writeRestartOutcome('proj/a', { state: 'ok', oldPid: 11, newPid: 22, httpStatus: 200, swappedAt: 3 })
+    expect(await t.execute({}, {})).toEqual({ state: 'ok', oldPid: 11, newPid: 22, httpStatus: 200, swappedAt: 3 })
+  })
+})
+
 describe('dryBootFailureDetail', () => {
   it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
     const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')

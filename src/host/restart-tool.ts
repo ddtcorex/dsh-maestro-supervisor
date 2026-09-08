@@ -19,7 +19,7 @@ import { tmpdir, homedir } from 'node:os'
 import { spawn, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { writeRestartRequest } from './restart-guards.js'
-import { intentPath } from './intents.js'
+import { intentPath, readIntent, readRestartOutcome } from './intents.js'
 
 /**
  * Copy a live profile tree for an isolated dry-boot. A naive recursive copy
@@ -298,6 +298,7 @@ export function registerRestartTool(ctx: any, deps: {
   let dispose: (() => void) | undefined
   let disposeDryboot: (() => void) | undefined
   let disposeGc: (() => void) | undefined
+  let disposeStatus: (() => void) | undefined
   try {
     dispose = ctx.tools.register({
       name: 'dsh_web_restart',
@@ -397,10 +398,37 @@ export function registerRestartTool(ctx: any, deps: {
   } catch (e: any) {
     try { ctx.logger?.warn?.(`[supervisor] dsh_web_gc tool failed: ${e?.message ?? String(e)}`) } catch {}
   }
+  try {
+    disposeStatus = ctx.tools.register({
+      name: 'dsh_web_restart_status',
+      description: 'Read the outcome of the calling session\u2019s latest scheduled dsh web restart (pending until the daemon swaps and health-checks).',
+      parameters: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args: any, value: any) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      execute: async (_args: any, exec: any) => {
+        const callerSessionId = doSessionId(exec)
+        if (!callerSessionId) return { state: 'none', detail: 'cannot identify the calling session' }
+        const outcome = readRestartOutcome(callerSessionId)
+        if (outcome) return { ...outcome }
+        const intent = readIntent(callerSessionId)
+        if (intent) return { state: 'pending', detail: 'restart scheduled, daemon has not reported back yet' }
+        return { state: 'none', detail: 'no restart scheduled for this session' }
+      },
+    })
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] dsh_web_restart_status tool failed: ${e?.message ?? String(e)}`) } catch {}
+  }
   return () => {
     try { if (typeof dispose === 'function') dispose() } catch {}
     try { if (typeof disposeDryboot === 'function') disposeDryboot() } catch {}
     try { if (typeof disposeGc === 'function') disposeGc() } catch {}
+    try { if (typeof disposeStatus === 'function') disposeStatus() } catch {}
   }
 }
 
