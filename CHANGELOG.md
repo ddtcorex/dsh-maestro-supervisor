@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.10] - 2026-09-08
+
+### Fixed
+
+- **Dry-boot profile copy repairs relative `link:` symlinks** — the
+  recursive copy left `link:` installs dangling under the temp DSH_HOME,
+  failing the dry-boot gate with loader errors. Dangling links are now
+  rewritten to their absolute live targets via `copyProfileForDryBoot()`
+  (#65).
+
 ## [0.7.9] - 2026-09-03
 
 ### Fixed
