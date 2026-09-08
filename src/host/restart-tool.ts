@@ -225,6 +225,7 @@ export function registerRestartTool(ctx: any, deps: {
   const doWrite = deps.writeRestartRequest ?? writeRestartRequest
   const doSessionId = deps.sessionIdOf ?? currentSessionId
   let dispose: (() => void) | undefined
+  let disposeDryboot: (() => void) | undefined
   try {
     dispose = ctx.tools.register({
       name: 'dsh_web_restart',
@@ -263,7 +264,34 @@ export function registerRestartTool(ctx: any, deps: {
   } catch (e: any) {
     try { ctx.logger?.warn?.(`[supervisor] dsh_web_restart tool failed: ${e?.message ?? String(e)}`) } catch {}
   }
-  return () => { try { if (typeof dispose === 'function') dispose() } catch {} }
+  try {
+    disposeDryboot = ctx.tools.register({
+      name: 'dsh_web_dryboot',
+      description: 'Validate the plugin tree by booting a copy of the live profile on an ephemeral port. Never schedules or performs a restart; temp home removed afterwards.',
+      parameters: {
+        type: 'object',
+        properties: {
+          timeoutMs: { type: 'number', description: 'Gate timeout in ms (default 60000).' },
+        },
+        additionalProperties: false,
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, detail: { type: 'string' } } },
+        render: (_args: any, value: any) => [{ type: 'text', text: value.detail }],
+      },
+      execute: async (args: any) => {
+        const harnessRoot = deps.harnessRoot ?? (await import('./paths.js')).resolveDeepseekHarnessDir()
+        const gate = await doDryBoot(harnessRoot, typeof args.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : undefined)
+        return { ok: gate.ok, detail: gate.detail }
+      },
+    })
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] dsh_web_dryboot tool failed: ${e?.message ?? String(e)}`) } catch {}
+  }
+  return () => {
+    try { if (typeof dispose === 'function') dispose() } catch {}
+    try { if (typeof disposeDryboot === 'function') disposeDryboot() } catch {}
+  }
 }
 
 function writeIntentSidecar(sessionId: string | undefined, reason: string | undefined): void {

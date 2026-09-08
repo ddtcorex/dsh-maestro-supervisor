@@ -218,7 +218,28 @@ describe('dryBootVerify', () => {
   })
 })
 
-describe('dryBootFailureDetail', () => {  it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
+describe('dsh_web_dryboot', () => {
+  it('runs the dry-boot gate and returns its result without scheduling', async () => {
+    const registered: any[] = []
+    const ctx: any = {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    }
+    const dryBoot = vi.fn(async () => ({ ok: true, detail: 'dry-boot ok' }))
+    const writeRestartRequest = vi.fn()
+    registerRestartTool(ctx, { dryBoot, writeRestartRequest, harnessRoot: '/repo' } as any)
+    const t = registered.find(x => x.name === 'dsh_web_dryboot')
+    expect(t).toBeDefined()
+    const result = await t.execute({ timeoutMs: 5000 }, {})
+    expect(dryBoot).toHaveBeenCalledWith('/repo', { timeoutMs: 5000 })
+    expect(result).toEqual({ ok: true, detail: 'dry-boot ok' })
+    expect(writeRestartRequest).not.toHaveBeenCalled()
+  })
+})
+
+describe('dryBootFailureDetail', () => {
+  it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
     const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
     const tail = [
       'node:internal/modules/esm/loader',
