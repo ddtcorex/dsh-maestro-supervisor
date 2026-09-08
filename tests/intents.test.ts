@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { intentsDir, intentPath, readIntent, consumeIntent } from '../src/host/intents.js'
+import { intentsDir, intentPath, readIntent, consumeIntent, writeRestartOutcome, readRestartOutcome } from '../src/host/intents.js'
 
 let tmpHome = ''
 
@@ -37,5 +37,14 @@ describe('restart intents sidecar', () => {
     mkdirSync(intentsDir(), { recursive: true })
     writeFileSync(intentPath(sessionId), '{ not json', 'utf8')
     expect(readIntent(sessionId)).toBeUndefined()
+  })
+})
+
+describe('restart outcome sidecar', () => {
+  it('round-trips a restart outcome through the sidecar', () => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'intents-'))
+    writeRestartOutcome('proj/abc', { state: 'ok', oldPid: 11, newPid: 22, httpStatus: 200, swappedAt: 123 })
+    expect(readRestartOutcome('proj/abc')).toEqual({ state: 'ok', oldPid: 11, newPid: 22, httpStatus: 200, swappedAt: 123 })
+    expect(readRestartOutcome('proj/nonexistent')).toBeUndefined()
   })
 })

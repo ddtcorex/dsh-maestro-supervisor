@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -29,4 +29,39 @@ export function readIntent(sessionId: string): RestartIntent | undefined {
 
 export function consumeIntent(sessionId: string): void {
   try { unlinkSync(intentPath(sessionId)) } catch {}
+}
+
+/**
+ * Post-swap outcome written by the supervisor daemon after acting on a
+ * restart request (`<sessionId>.outcome.json`, mode 600, same dir). Read by
+ * `dsh_web_restart_status` so callers learn the new PID + HTTP status without
+ * hand-probing `ss`/`curl`.
+ */
+export interface RestartOutcome {
+  state: 'ok' | 'failed'
+  oldPid?: number
+  newPid?: number
+  httpStatus?: number
+  swappedAt: number
+  error?: string
+}
+
+export function outcomePath(sessionId: string): string {
+  const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, '_')
+  return join(intentsDir(), `${safe}.outcome.json`)
+}
+
+export function writeRestartOutcome(sessionId: string, outcome: RestartOutcome): void {
+  try {
+    mkdirSync(intentsDir(), { recursive: true })
+    writeFileSync(outcomePath(sessionId), JSON.stringify(outcome), { encoding: 'utf8', mode: 0o600 })
+  } catch {}
+}
+
+export function readRestartOutcome(sessionId: string): RestartOutcome | undefined {
+  try {
+    const p = outcomePath(sessionId)
+    if (!existsSync(p)) return undefined
+    return JSON.parse(readFileSync(p, 'utf8')) as RestartOutcome
+  } catch { return undefined }
 }
