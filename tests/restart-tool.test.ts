@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync, readlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
-import { registerRestartTool, isPluginTreeChanged, dryBootVerify } from '../src/host/restart-tool.js'
+import { registerRestartTool, isPluginTreeChanged, dryBootVerify, copyProfileForDryBoot } from '../src/host/restart-tool.js'
 
 // Point os.homedir() at a per-file temp home: tool registration, dry-boot
 // gating (isPluginTreeChanged's default LKG dir) and the intent sidecar never
@@ -218,8 +218,7 @@ describe('dryBootVerify', () => {
   })
 })
 
-describe('dryBootFailureDetail', () => {
-  it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
+describe('dryBootFailureDetail', () => {  it('names the colliding port for an EADDRINUSE on the webhook port :3000', async () => {
     const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
     const tail = [
       'node:internal/modules/esm/loader',
@@ -249,6 +248,33 @@ describe('dryBootFailureDetail', () => {
   it('falls back to the generic exit detail when nothing is classified', async () => {
     const { dryBootFailureDetail } = await import('../src/host/restart-tool.js')
     expect(dryBootFailureDetail('some other log line', 3)).toBe('dry-boot failed (exit 3)')
+  })
+})
+
+describe('copyProfileForDryBoot', () => {
+  it('rewrites a relative link: symlink that dangles in the copy to its absolute live target', () => {
+    const src = mkdtempSync(join(tmpdir(), 'dryboot-src-'))
+    const dest = join(tmpdir(), `dryboot-dest-${Date.now()}`)
+    try {
+      // A link: install: node_modules/@scope/pkg -> ../../shared/pkg,
+      // valid in the live tree, dangling under any naive recursive copy.
+      const targetDir = join(src, 'shared/pkg')
+      mkdirSync(targetDir, { recursive: true })
+      writeFileSync(join(targetDir, 'package.json'), JSON.stringify({ name: 'pkg' }))
+      const linkDir = join(src, 'node_modules/@scope')
+      mkdirSync(linkDir, { recursive: true })
+      symlinkSync('../../shared/pkg', join(linkDir, 'pkg'))
+
+      copyProfileForDryBoot(src, dest)
+
+      const copiedLink = join(dest, 'node_modules/@scope/pkg')
+      const rewritten = readlinkSync(copiedLink)
+      expect(existsSync(rewritten)).toBe(true)
+      expect(JSON.parse(readFileSync(join(rewritten, 'package.json'), 'utf8')).name).toBe('pkg')
+    } finally {
+      rmSync(src, { recursive: true, force: true })
+      rmSync(dest, { recursive: true, force: true })
+    }
   })
 })
 

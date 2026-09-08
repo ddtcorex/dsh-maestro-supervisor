@@ -13,12 +13,44 @@
  *      (out-of-band). This tool NEVER restarts the host in-tree.
  */
 
-import { join } from 'node:path'
-import { mkdtempSync, rmSync, cpSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { join, dirname, resolve } from 'node:path'
+import { mkdtempSync, rmSync, cpSync, existsSync, readFileSync, readdirSync, statSync, lstatSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { writeRestartRequest } from './restart-guards.js'
+
+/**
+ * Copy a live profile tree for an isolated dry-boot. A naive recursive copy
+ * breaks `link:` installs: their node_modules entries are relative symlinks
+ * (e.g. `../../../shared/pkg`) that resolve against the copy location and
+ * dangle. Every symlink left dangling by the copy is rewritten to the
+ * absolute live target it pointed at, so the dry-boot loads the same code
+ * the live tree loads. Links already broken in the live tree are left alone
+ * (the dry-boot must stay faithful, not fix the live tree).
+ */
+export function copyProfileForDryBoot(srcDir: string, destDir: string): void {
+  cpSync(srcDir, destDir, { recursive: true, preserveTimestamps: true })
+  const repair = (dir: string, rel: string): void => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name)
+      const r = rel ? `${rel}/${name}` : name
+      const st = lstatSync(p)
+      if (st.isSymbolicLink()) {
+        if (!existsSync(p)) {
+          const liveTarget = resolve(srcDir, dirname(r), readlinkSync(p))
+          if (existsSync(liveTarget)) {
+            unlinkSync(p)
+            symlinkSync(liveTarget, p)
+          }
+        }
+      } else if (st.isDirectory()) {
+        repair(p, r)
+      }
+    }
+  }
+  repair(destDir, '')
+}
 
 /**
  * Boot a copy of the live web profile on an isolated DSH_HOME and verify the
@@ -40,7 +72,7 @@ export async function dryBootVerify(harnessRoot: string, opts: { timeoutMs?: num
   const logs: string[] = []
   let child: ReturnType<typeof spawn> | null = null
   try {
-    cpSync(liveProfile, join(tmpHome, 'profiles', 'web'), { recursive: true, preserveTimestamps: true })
+    copyProfileForDryBoot(liveProfile, join(tmpHome, 'profiles', 'web'))
     const port = String(9000 + Math.floor(Math.random() * 1000))
     const url = `http://127.0.0.1:${port}/`
     child = spawn('node', ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', 'web', '--no-open', '--port', port], {
