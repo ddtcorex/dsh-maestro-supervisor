@@ -71,7 +71,7 @@ describe('registerRestartTool', () => {
     const result = await tool.execute({ reason: 'plugin fixed' }, {})
     expect(result.ok).toBe(true)
     expect(deps.writeRestartRequest).toHaveBeenCalledWith(
-      { callerSessionId: 'proj/abc', reason: 'plugin fixed' }, expect.any(Number))
+      expect.objectContaining({ callerSessionId: 'proj/abc', reason: 'plugin fixed' }), expect.any(Number))
     expect(result.detail).toMatch(/scheduled/)
     dispose()
   })
@@ -148,7 +148,7 @@ describe('registerRestartTool', () => {
     const result = await t.execute({ pluginChanged: false, reason: 'plugin v2' }, exec)
     expect(result.ok).toBe(true)
     expect(deps.writeRestartRequest).toHaveBeenCalledWith(
-      { callerSessionId: 'proj/s-1', reason: 'plugin v2' }, expect.any(Number))
+      expect.objectContaining({ callerSessionId: 'proj/s-1', reason: 'plugin v2' }), expect.any(Number))
     expect(result.detail).toMatch(/caller proj\/s-1/)
   })
 
@@ -300,6 +300,26 @@ describe('dsh_web_gc', () => {
     const result = await t.execute({ confirm: true }, {})
     expect(result).toEqual({ killed: [], candidates: [] })
     expect(killPid).not.toHaveBeenCalled()
+  })
+})
+
+describe('dsh_web_restart evidence', () => {
+  it('returns oldPid + intentPath and carries oldPid in the marker', async () => {
+    const registered: any[] = []
+    const ctx: any = {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    }
+    const writeRestartRequest = vi.fn()
+    const deps = { sessionIdOf: () => 'proj/abc', writeRestartRequest }
+    registerRestartTool(ctx, deps as any)
+    const t = registered.find(x => x.name === 'dsh_web_restart')
+    const result = await t.execute({ reason: 'x' }, {})
+    expect(result.oldPid).toBe(process.pid)
+    expect(result.intentPath).toContain('intents')
+    expect(writeRestartRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ oldPid: process.pid }), expect.any(Number))
   })
 })
 

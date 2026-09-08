@@ -135,6 +135,13 @@ describe('restart-request marker', () => {
     expect(readRestartRequest()).toBeUndefined()
     clearPlannedRestart()
   })
+
+  it('carries oldPid through the marker round-trip', () => {
+    clearPlannedRestart()
+    writeRestartRequest({ callerSessionId: 'proj/s-1', reason: 'r', oldPid: 4242 }, 180_000)
+    expect(readRestartRequest()?.oldPid).toBe(4242)
+    clearPlannedRestart()
+  })
 })
 
 const restartScriptPath = join(

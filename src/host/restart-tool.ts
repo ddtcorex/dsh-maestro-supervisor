@@ -19,6 +19,7 @@ import { tmpdir, homedir } from 'node:os'
 import { spawn, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { writeRestartRequest } from './restart-guards.js'
+import { intentPath } from './intents.js'
 
 /**
  * Copy a live profile tree for an isolated dry-boot. A naive recursive copy
@@ -327,9 +328,9 @@ export function registerRestartTool(ctx: any, deps: {
           // marker would be written but no restart would ever be supervised.
           return { ok: false, detail: 'cannot identify the calling session — restart not scheduled' }
         }
-        doWrite({ callerSessionId, reason: typeof args.reason === 'string' ? args.reason : undefined }, 180_000)
+        doWrite({ callerSessionId, reason: typeof args.reason === 'string' ? args.reason : undefined, oldPid: process.pid }, 180_000)
         writeIntentSidecar(callerSessionId, args.reason)
-        return { ok: true, detail: `restart scheduled (≈30s) — caller ${callerSessionId}` }
+        return { ok: true, detail: `restart scheduled (≈30s) — caller ${callerSessionId}`, oldPid: process.pid, intentPath: intentPath(callerSessionId) }
       },
     })
   } catch (e: any) {
