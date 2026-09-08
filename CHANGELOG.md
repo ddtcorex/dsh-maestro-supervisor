@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.0] - 2026-09-08
+
+### Added
+
+- **`dsh_web_dryboot` tool** — standalone dry-boot gate on an ephemeral
+  port with isolated `DSH_HOME`; validates the plugin tree without
+  scheduling anything (#67).
+- **`dsh_web_gc` tool** — preview-first orphan reaper for dry-boot
+  processes (conjunctive fingerprint: temp `DSH_HOME` + ephemeral
+  listener; never self, live ports, or real-home processes) (#67).
+- **`dsh_web_restart_status` tool** — pending/ok/failed outcome query
+  from the intent sidecar (#67).
+- **Restart evidence** — `dsh_web_restart` returns
+  `{ ok, detail, oldPid, intentPath }`; the marker carries `oldPid` and
+  the daemon writes `{ state, oldPid, newPid, httpStatus, swappedAt }`
+  after a supervised swap (#67).
+
+### Changed
+
+- Skill docs: in-session validation flows, settings-staging rule,
+  `NODE_EXTRA_CA_CERTS` birth-environment note; stale `:3000`
+  troubleshooting row replaced with the `dsh_web_gc` flow (#67).
+
 ## [0.7.10] - 2026-09-08
 
 ### Fixed
