@@ -56,7 +56,7 @@ Part of the Maestro Harness suite. See spec for Phase 2 (loader isolation) and P
 - `src/host/plugin.ts` — in-tree Cordis host plugin: `inject: ['sessions','agents','connection']`, `apply()` (never throws), `runAutoResume()` (merges interrupted + dangling, 5m window), `resumeInterrupted()` (agents.get → agents.resume + recover provider/model + followup continue), `createResumeRpcHandler()` (`scan`/`resume` endpoints)
 - `src/client/auto-reload.ts` — in-tree Cordis client plugin: `apply()` with `ctx.effect`, `fetch HEAD /` polling on `offline`/`WebSocket close`/`visibilitychange`, `window.location.reload()` on `200`. Built via `tsc -p tsconfig.client.json && node scripts/build-client.mjs` → `lib/client.js` (`window.__ModuleLoader__.load` wrapper).
 - `src/client/index.ts` — re-export for bundler entry (`export * from './auto-reload.js'`)
-- `lib/` — committed build output. Generated; do not hand-edit. `lib/client.js` is the browser bundle (2 modules inlined), `lib/types/` for d.ts.
+- `lib/` — gitignored build output. Generated; do not hand-edit, never commit. `lib/client.js` is the browser bundle (2 modules inlined), `lib/types/` for d.ts.
 - `lib/types/` — emitted declarations. `lib/client.js` served at `/plugins/@ddtcorex/dsh-maestro-supervisor/client.js` via `ClientModuleRegistry` (`dsh.client` declaration).
 - `scripts/build-client.mjs` — wraps `.client-build` CommonJS into `window.__ModuleLoader__.load` (mobile pattern). Inlines relative `require("./x.js")`.
 - `tsconfig.json` — host: `rootDir src/host → lib`, `module nodenext`
@@ -105,7 +105,7 @@ test -f packages/dsh-maestro-supervisor/lib/index.js
 test -f packages/dsh-maestro-supervisor/lib/client.js
 ```
 
-`pnpm build` is required after any `src/` change; `lib/` is committed.
+`pnpm build` is required after any `src/` change; `lib/` is gitignored, so rebuild locally after pull and before restart.
 
 ### 2. Add to DSH Web profile (host + client)
 
@@ -190,7 +190,7 @@ pnpm build    # tsc host + tsc client + node scripts/build-client.mjs → lib/ +
 
 Client: `src/client/auto-reload.ts` is the browser half, built via `tsconfig.client.json` (`rootDir src/client → .client-build`) then bundled by `scripts/build-client.mjs` into `lib/client.js` (`window.__ModuleLoader__.load` wrapper, 2 modules inlined). Host: `src/host/*` → `lib/*.js` (flat, `rootDir src/host`).
 
-`pnpm build` is required after any source change; `lib/` and `lib/client.js` are committed. `test -f lib/index.js && test -f lib/client.js` after build.
+`pnpm build` is required after any source change; `lib/` and `lib/client.js` are gitignored, so rebuild locally after pull and before restart. `test -f lib/index.js && test -f lib/client.js` after build.
 
 CLI:
 
@@ -207,7 +207,7 @@ DSH_INTEGRATION=1 pnpm test -- tests/integration.test.ts  # needs real DSH web
 - Conventional commits, imperative mood (`feat:`, `fix:`, `docs:`, `chore:`). Scope without `dsh-maestro-` prefix (e.g. `fix(supervisor):`).
 - One TDD task = one commit; never commit while `pnpm verify` is red.
 - When the base moves, rebase the feature branch onto `origin/master`.
-- `lib/` is committed — rebuild before committing.
+- `lib/` is gitignored — rebuild locally after pull and before restart, never commit build output.
 - **Always request approval before merge or release:** never merge a PR/MR or publish a release (`git tag`/`pnpm publish`/`gh release`) without an explicit human `APPROVED` — request review (`gh pr ready` / `gh pr request-review` / ask in chat) and wait for `APPROVED`.
 
 ## Conventions
@@ -242,7 +242,7 @@ Never `A inject: ['B']` and `B inject: ['A']` — Cordis will deadlock. Pick one
 
 ### Client bundling
 
-Host `tsc` outputs `lib/*.js` (flat, `rootDir src/host`). Client `tsc` outputs `.client-build/*.js` (CommonJS), then `scripts/build-client.mjs` inlines them into `lib/client.js` (`window.__ModuleLoader__.load` wrapper, 2 modules). `package.json` `dsh.client` declares `platform: web` + `inject: ["@deepseek-ai/dsh-client-runtime"]` and `exports["./client"]` points to `lib/client.js`. The `ClientModuleRegistry` (`@deepseek-ai/dsh-client-modules`) serves `/plugins/<id>/client.js` from that path. `pnpm build` must run both steps; `lib/client.js` is committed.
+Host `tsc` outputs `lib/*.js` (flat, `rootDir src/host`). Client `tsc` outputs `.client-build/*.js` (CommonJS), then `scripts/build-client.mjs` inlines them into `lib/client.js` (`window.__ModuleLoader__.load` wrapper, 2 modules). `package.json` `dsh.client` declares `platform: web` + `inject: ["@deepseek-ai/dsh-client-runtime"]` and `exports["./client"]` points to `lib/client.js`. The `ClientModuleRegistry` (`@deepseek-ai/dsh-client-modules`) serves `/plugins/<id>/client.js` from that path. `pnpm build` must run both steps; `lib/client.js` is gitignored, so rebuild locally after pull and before restart.
 
 ## Validation
 
