@@ -12,6 +12,9 @@ import { classifySessionLog, repairSingleFrameLog, runSessionHealthCheck } from 
 const compress = (data: Buffer): Buffer => zstdCompressSync(data)
 
 const header = (id: string) => JSON.stringify({ type: 'session', version: 0, id, createdAt: 1, cwd: '/work', delegationDepth: 0, agentPreset: 'cordis' }) + '\n'
+// V3 header shape (dsh-v0.1.5-rc.1 session-format v3): the frame classifier is
+// version-agnostic, but this pins that a real-shaped V3 log classifies cleanly.
+const headerV3 = (id: string) => JSON.stringify({ type: 'session', version: 3, id, createdAt: 1, cwd: '/work', isSeeded: false, delegationDepth: 0, agentPreset: 'cordis' }) + '\n'
 const writeLog = (dir: string, frames: Buffer[]) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'session.jsonl.zstd'), Buffer.concat(frames)) }
 
 describe('session health scan', () => {
@@ -192,6 +195,34 @@ describe.skipIf(realSingleFrameBackup === undefined)('2026-09-01 real artifact (
       const repairedPlain = Buffer.from(decompress(repaired))
       expect(repairedPlain.toString('utf8')).toBe(payload.toString('utf8'))
       expect(headerSessionId(repairedPlain)).toBe(id)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// DSH 0.1.5-rc.1 session-format V3. The frame classifier is version-agnostic
+// (first frame header-only single line => ok), but these synthetic V3-shaped
+// cases pin that a version:3 log classifies and repairs exactly like V0.
+// Fully synthetic — no host files, CI-safe.
+// ---------------------------------------------------------------------------
+describe('session health on V3-shaped logs', () => {
+  it('classifies a healthy V3 multi-frame log as ok', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sh-v3-healthy-'))
+    try {
+      writeLog(dir, [compress(Buffer.from(headerV3('v3a'))), compress(Buffer.from('{"type":"turn/start","seq":1,"time":2,"data":{"turn":1}}\n'))])
+      expect((await classifySessionLog(join(dir, 'session.jsonl.zstd'))).klass).toBe('ok')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('repairs a V3 single whole-file frame byte-for-byte', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sh-v3-single-'))
+    try {
+      const payload = headerV3('v3b') + '{"type":"turn/start","seq":1,"time":2,"data":{"turn":1}}\n'
+      writeLog(dir, [compress(Buffer.from(payload))])
+      const path = join(dir, 'session.jsonl.zstd')
+      expect((await classifySessionLog(path)).klass).toBe('single-frame-whole-log')
+      await repairSingleFrameLog(path)
+      expect((await classifySessionLog(path)).klass).toBe('ok')
+      expect(Buffer.from(decompress(readFileSync(path))).toString('utf8')).toBe(payload)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })
