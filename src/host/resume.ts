@@ -13,6 +13,25 @@ export interface FindInterruptedOpts {
 }
 
 /**
+ * Resolve the readable session log inside one session directory across
+ * format generations. `session.v3.jsonl.zstd` is the current successor;
+ * `session.jsonl.zstd` / `session.jsonl` remain for committed older
+ * generations (migrations never move or delete them). Prefer v3 when
+ * present — live sessions persist there, and a scan that only knows the
+ * old names silently skips every current session (2026-09-11: auto-resume
+ * found nothing after a restart, so no recovery continue was triggered).
+ */
+export function resolveSessionLogPath(dir: string): string | undefined {
+  const v3 = path.join(dir, 'session.v3.jsonl.zstd')
+  if (fs.existsSync(v3)) return v3
+  const zstd = path.join(dir, 'session.jsonl.zstd')
+  if (fs.existsSync(zstd)) return zstd
+  const jsonl = path.join(dir, 'session.jsonl')
+  if (fs.existsSync(jsonl)) return jsonl
+  return undefined
+}
+
+/**
  * Read the last ~100 lines of one session's raw log, applying the mtime
  * pre-filter before any (potentially expensive) zstd decompression: a
  * session log's mtime only advances when something is appended to it, so a
@@ -24,25 +43,22 @@ export interface FindInterruptedOpts {
  * @returns `undefined` when the session has no log file, or is filtered
  *   out by `sinceMs` — callers must treat that the same as "nothing found".
  */
-async function readSessionTailLines(zstdPath: string, jsonlPath: string, sinceMs: number | undefined): Promise<string[] | undefined> {
+async function readSessionTailLines(logPath: string | undefined, sinceMs: number | undefined): Promise<string[] | undefined> {
+  if (logPath === undefined) return undefined
   if (sinceMs !== undefined) {
     try {
-      const statPath = fs.existsSync(zstdPath) ? zstdPath : (fs.existsSync(jsonlPath) ? jsonlPath : undefined)
-      if (statPath) {
-        const mtimeMs = fs.statSync(statPath).mtimeMs
-        if (mtimeMs < sinceMs) return undefined
-      }
+      if (fs.statSync(logPath).mtimeMs < sinceMs) return undefined
     } catch {}
   }
-  if (fs.existsSync(zstdPath)) {
+  if (logPath.endsWith('.zstd')) {
     const { execSync } = await import('node:child_process')
-    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | tail -100`, { encoding: 'utf-8' })
+    const out = execSync(`zstd -d -c ${JSON.stringify(logPath)} 2>/dev/null | tail -100`, { encoding: 'utf-8' })
     return out.split('\n').filter(Boolean)
   }
-  if (fs.existsSync(jsonlPath)) {
-    const content = fs.readFileSync(jsonlPath, 'utf-8')
+  try {
+    const content = fs.readFileSync(logPath, 'utf-8')
     return content.trim().split('\n').slice(-100)
-  }
+  } catch {}
   return undefined
 }
 
@@ -63,10 +79,9 @@ export async function findInterrupted(dshHome?: string, opts?: FindInterruptedOp
       for (const s of sessions) {
         if (!s.isDirectory()) continue
         scanned++
-        const zstdPath = path.join(groupPath, s.name, 'session.jsonl.zstd')
-        const jsonlPath = path.join(groupPath, s.name, 'session.jsonl')
+        const logPath = resolveSessionLogPath(path.join(groupPath, s.name))
         try {
-          const lines = await readSessionTailLines(zstdPath, jsonlPath, sinceMs)
+          const lines = await readSessionTailLines(logPath, sinceMs)
           if (lines === undefined) continue
           let found = false
           let foundTime: number | undefined
@@ -102,29 +117,26 @@ export async function findInterrupted(dshHome?: string, opts?: FindInterruptedOp
  * The mtime pre-filter ensures this full decompression runs only for
  * recent sessions (within 5m, typically 1-2 files), not for all 425.
  */
-async function readSessionAllLines(zstdPath: string, jsonlPath: string, sinceMs: number | undefined): Promise<string[] | undefined> {
+async function readSessionAllLines(logPath: string | undefined, sinceMs: number | undefined): Promise<string[] | undefined> {
+  if (logPath === undefined) return undefined
   if (sinceMs !== undefined) {
     try {
-      const statPath = fs.existsSync(zstdPath) ? zstdPath : (fs.existsSync(jsonlPath) ? jsonlPath : undefined)
-      if (statPath) {
-        const mtimeMs = fs.statSync(statPath).mtimeMs
-        if (mtimeMs < sinceMs) return undefined
-      }
+      if (fs.statSync(logPath).mtimeMs < sinceMs) return undefined
     } catch {}
   }
-  if (fs.existsSync(zstdPath)) {
+  if (logPath.endsWith('.zstd')) {
     const { execSync } = await import('node:child_process')
     // maxBuffer must exceed the decompressed size of any real session log —
     // worker sessions decode to 8-23MB while execSync's default 1MB would
     // throw ENOBUFS and silently drop the session from every scan that needs
     // the full file (findDanglingOpenTurns). Use 64MB to leave headroom.
-    const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null`, { encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 })
+    const out = execSync(`zstd -d -c ${JSON.stringify(logPath)} 2>/dev/null`, { encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 })
     return out.split('\n').filter(Boolean)
   }
-  if (fs.existsSync(jsonlPath)) {
-    const content = fs.readFileSync(jsonlPath, 'utf-8')
+  try {
+    const content = fs.readFileSync(logPath, 'utf-8')
     return content.trim().split('\n').filter(Boolean)
-  }
+  } catch {}
   return undefined
 }
 
@@ -158,10 +170,9 @@ export async function findDanglingOpenTurns(dshHome?: string, opts?: FindInterru
       for (const s of sessions) {
         if (!s.isDirectory()) continue
         scanned++
-        const zstdPath = path.join(groupPath, s.name, 'session.jsonl.zstd')
-        const jsonlPath = path.join(groupPath, s.name, 'session.jsonl')
+        const logPath = resolveSessionLogPath(path.join(groupPath, s.name))
         try {
-          const lines = await readSessionAllLines(zstdPath, jsonlPath, sinceMs)
+          const lines = await readSessionAllLines(logPath, sinceMs)
           if (lines === undefined) continue
           let openTurn: number | undefined
           let openTurnTime: number | undefined
