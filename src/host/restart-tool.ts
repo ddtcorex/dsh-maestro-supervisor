@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync, cpSync, existsSync, readFileSync, readdirSync, sta
 import { tmpdir, homedir } from 'node:os'
 import { spawn, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { writeRestartRequest } from './restart-guards.js'
+import { writeRestartRequest, readRestartRequest } from './restart-guards.js'
 import { intentPath, readIntent, readRestartOutcome } from './intents.js'
 
 /**
@@ -288,12 +288,14 @@ export function registerRestartTool(ctx: any, deps: {
   sessionIdOf?: (exec: any) => string | undefined
   dryBoot?: typeof dryBootVerify
   writeRestartRequest?: typeof writeRestartRequest
+  readRestartRequest?: typeof readRestartRequest
   harnessRoot?: string
   gcReaders?: GcReaders
   killPid?: (pid: number, sig: string) => void
 } = {}): () => void {
   const doDryBoot = deps.dryBoot ?? dryBootVerify
   const doWrite = deps.writeRestartRequest ?? writeRestartRequest
+  const doRead = deps.readRestartRequest ?? readRestartRequest
   const doSessionId = deps.sessionIdOf ?? currentSessionId
   let dispose: (() => void) | undefined
   let disposeDryboot: (() => void) | undefined
@@ -316,6 +318,22 @@ export function registerRestartTool(ctx: any, deps: {
         render: (_args: any, value: any) => [{ type: 'text', text: value.detail }],
       },
       execute: async (args: any, exec: any) => {
+        // Serialize: a fresh restart-request marker means a restart is
+        // already in flight (another session, the daemon, or an earlier
+        // call of this tool). Scheduling another one overlaps the ~90s
+        // SIGTERM stop and crash-loops on EADDRINUSE — refuse fast, before
+        // the dry-boot gate, and point at the status tool instead.
+        let inflight: ReturnType<typeof readRestartRequest> | undefined
+        try {
+          inflight = doRead()
+        } catch {
+          inflight = undefined
+        }
+        if (inflight !== undefined) {
+          const by = inflight.callerSessionId ?? 'unknown session'
+          const why = inflight.reason ? `: ${inflight.reason.slice(0, 120)}` : ''
+          return { ok: false, detail: `restart already in progress (requested by ${by}${why}) — check dsh_web_restart_status instead of scheduling another` }
+        }
         const harnessRoot = deps.harnessRoot ?? (await import('./paths.js')).resolveDeepseekHarnessDir()
         const lkgDir = join(homedir(), '.dsh/.supervisor/lkg')
         const changed = args.pluginChanged === true || (args.pluginChanged !== false && isPluginTreeChanged(harnessRoot, lkgDir))
