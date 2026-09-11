@@ -174,10 +174,14 @@ Commands:
         try {
           execSync(buildKillStalePortsCommand(), { timeout: 5000, stdio: 'pipe' })
         } catch {}
-        // Prefer systemd — if dsh-web.service is installed, restart/start it
+        // Prefer systemd — serialized stop → wait-inactive → start so the
+        // new process never boots while the old one still holds :3082
+        // (EADDRINUSE crash loop). Plain `systemctl restart` overlaps a
+        // slow SIGTERM stop (~90s under load).
         try {
-          execSync('systemctl --user is-active --quiet dsh-web.service && systemctl --user restart dsh-web.service || systemctl --user start dsh-web.service', { timeout: 15000, stdio: 'pipe' })
-          console.log('[supervisor] restarted dsh-web via systemd')
+          const { serializedSystemdRestart } = await import('./restart-exec.js')
+          await serializedSystemdRestart()
+          console.log('[supervisor] restarted dsh-web via systemd (stop-wait-start)')
           return
         } catch {}
         // Check if unit exists but not active — try start

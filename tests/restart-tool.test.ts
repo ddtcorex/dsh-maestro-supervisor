@@ -512,3 +512,44 @@ describe('isPluginTreeChanged', () => {
     expect(isPluginTreeChanged(fakeHome, undefined, { statFile })).toBe(true)
   })
 })
+
+describe('dsh_web_restart in-flight guard', () => {
+  function harness(over: Record<string, unknown> = {}) {
+    const registered: any[] = []
+    const ctx: any = {
+      tools: { register: (d: any) => { registered.push(d); return () => {} } },
+      logger: { info: () => {}, warn: () => {} },
+      get: () => undefined,
+    }
+    const dryBoot = vi.fn(async () => ({ ok: true, detail: '200' }))
+    const writeRestartRequest = vi.fn()
+    const deps: any = {
+      sessionIdOf: () => 'session-caller',
+      dryBoot,
+      writeRestartRequest,
+      readRestartRequest: () => undefined,
+      ...over,
+    }
+    registerRestartTool(ctx, deps)
+    const t = registered.find(x => x.name === 'dsh_web_restart')
+    return { t, dryBoot, writeRestartRequest }
+  }
+
+  it('refuses to schedule while another restart request is still fresh', async () => {
+    const { t, dryBoot, writeRestartRequest } = harness({
+      readRestartRequest: () => ({ ts: Date.now(), ttl: 180_000, callerSessionId: 'session-other', reason: 'earlier' }),
+    })
+    const result = await t.execute({ pluginChanged: false }, {})
+    expect(result.ok).toBe(false)
+    expect(result.detail).toMatch(/already in progress/)
+    expect(writeRestartRequest).not.toHaveBeenCalled()
+    expect(dryBoot).not.toHaveBeenCalled()
+  })
+
+  it('schedules once the previous request has expired', async () => {
+    const { t, writeRestartRequest } = harness({ readRestartRequest: () => undefined })
+    const result = await t.execute({ pluginChanged: false }, {})
+    expect(result.ok).toBe(true)
+    expect(writeRestartRequest).toHaveBeenCalledTimes(1)
+  })
+})

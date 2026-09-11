@@ -149,11 +149,15 @@ export class Supervisor {
       await this.deps.restartWeb()
       return
     }
-    // Fallback systemctl path (mirrors cli.ts) — kept for standalone use
+    // Fallback systemctl path (mirrors cli.ts) — kept for standalone use.
+    // Serialized stop → wait-inactive → start: a raw `systemctl restart`
+    // boots the new process while a slow-stopping old one still holds
+    // :3082 and crash-loops on EADDRINUSE.
     const { execSync } = await import('node:child_process')
     try { execSync(buildKillStalePortsCommand(), { timeout: 5000, stdio: 'pipe' }) } catch {}
     try {
-      execSync('systemctl --user is-active --quiet dsh-web.service && systemctl --user restart dsh-web.service || systemctl --user start dsh-web.service', { timeout: 15000, stdio: 'pipe' } as any)
+      const { serializedSystemdRestart } = await import('./restart-exec.js')
+      await serializedSystemdRestart()
       return
     } catch {}
     try {
