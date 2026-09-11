@@ -13,7 +13,7 @@ vi.mock('node:child_process', async () => {
 })
 
 import * as childProcess from 'node:child_process'
-import { findInterrupted, findDanglingOpenTurns } from '../src/host/resume.js'
+import { findInterrupted, findDanglingOpenTurns, resolveSessionLogPath } from '../src/host/resume.js'
 
 const mockedExecSync = childProcess.execSync as unknown as ReturnType<typeof vi.fn>
 
@@ -238,5 +238,57 @@ describe('findDanglingOpenTurns — genuinely fresh crash, no closer written yet
     mockedExecSync.mockClear() // ignore the fixture zstd compression calls
     const res = await findDanglingOpenTurns(tmp)
     expect(res.interrupted).toContain('proj/sess-big-open-turn')
+  })
+})
+
+function writeZstdV3(dir: string, lines: string[], mtime?: Date) {
+  const plain = path.join(dir, '_src.jsonl')
+  fs.writeFileSync(plain, lines.join('\n') + '\n')
+  const zstdPath = path.join(dir, 'session.v3.jsonl.zstd')
+  childProcess.execSync(`zstd -q -f ${JSON.stringify(plain)} -o ${JSON.stringify(zstdPath)}`)
+  fs.rmSync(plain)
+  if (mtime) fs.utimesSync(zstdPath, mtime, mtime)
+}
+
+// Regression (2026-09-11 dsh-home outage): live sessions persist as
+// `session.v3.jsonl.zstd`, but the resume scan only looked for
+// `session.jsonl.zstd`/`session.jsonl` — every current session was
+// silently skipped, so no recovery continue was ever triggered.
+describe('v3 session logs', () => {
+  it('resolveSessionLogPath prefers the v3 log when both generations exist', () => {
+    const dir = sessionDir('proj', 'sess-both')
+    writeJsonl(dir, [completedLine(Date.now())])
+    writeZstd(dir, [completedLine(Date.now())])
+    const v3plain = path.join(dir, '_v3.jsonl')
+    fs.writeFileSync(v3plain, interruptedLine(Date.now()) + '\n')
+    const v3path = path.join(dir, 'session.v3.jsonl.zstd')
+    if (zstdAvailable) {
+      childProcess.execSync(`zstd -q -f ${JSON.stringify(v3plain)} -o ${JSON.stringify(v3path)}`)
+    } else {
+      fs.writeFileSync(v3path, 'v3-stub')
+    }
+    fs.rmSync(v3plain)
+    expect(resolveSessionLogPath(dir)).toBe(v3path)
+  })
+
+  it.skipIf(!zstdAvailable)('findInterrupted detects a trailing interrupted turn/end in a v3 log', async () => {
+    const dir = sessionDir('proj', 'sess-v3-interrupted')
+    writeZstdV3(dir, [
+      JSON.stringify({ type: 'turn/start', time: Date.now() - 1000, data: { turn: 9 } }),
+      JSON.stringify({ type: 'turn/end', time: Date.now(), data: { turn: 9, reason: { kind: 'interrupted' } } }),
+    ])
+    const res = await findInterrupted(tmp)
+    expect(res.interrupted).toContain('proj/sess-v3-interrupted')
+  })
+
+  it.skipIf(!zstdAvailable)('findDanglingOpenTurns detects an open turn in a v3 log', async () => {
+    const now = Date.now()
+    const dir = sessionDir('proj', 'sess-v3-dangling')
+    writeZstdV3(dir, [
+      JSON.stringify({ type: 'turn/start', time: now - 2000, data: { turn: 11 } }),
+      JSON.stringify({ type: 'step/start', time: now - 1900, data: { turn: 11, step: 1 } }),
+    ], new Date(now - 1000))
+    const res = await findDanglingOpenTurns(tmp)
+    expect(res.interrupted).toContain('proj/sess-v3-dangling')
   })
 })

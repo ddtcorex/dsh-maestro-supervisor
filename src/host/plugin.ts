@@ -10,7 +10,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns } from './resume.js'
+import { findInterrupted as defaultFindInterrupted, findDanglingOpenTurns as defaultFindDanglingOpenTurns, resolveSessionLogPath } from './resume.js'
 import { readIntent, consumeIntent } from './intents.js'
 import type { RestartIntent } from './intents.js'
 import { appendResumeLog, type ResumeLogEntry } from './resume-log.js'
@@ -324,27 +324,25 @@ async function readRouteFromHandle(persistence: any, sid: unknown): Promise<Reco
  * first match so huge logs cost one streamed pass, not a full decode.
  */
 async function readRouteFromRawLog(sessionsRoot: string, group: string, sessionId: string): Promise<RecoveredRoute | undefined> {
-  const zstdPath = path.join(sessionsRoot, group, sessionId, 'session.jsonl.zstd')
-  const jsonlPath = path.join(sessionsRoot, group, sessionId, 'session.jsonl')
+  const logPath = resolveSessionLogPath(path.join(sessionsRoot, group, sessionId))
+  if (logPath === undefined) return undefined
   try {
-    if (fs.existsSync(zstdPath)) {
+    if (logPath.endsWith('.zstd')) {
       const { execSync } = await import('node:child_process')
-      const out = execSync(`zstd -d -c ${JSON.stringify(zstdPath)} 2>/dev/null | grep -a -m1 '"type":"request/context"'`, { encoding: 'utf-8' })
+      const out = execSync(`zstd -d -c ${JSON.stringify(logPath)} 2>/dev/null | grep -a -m1 '"type":"request/context"'`, { encoding: 'utf-8' })
       const line = out.split('\n').find((l) => l.includes('request/context'))
       if (line !== undefined) {
         try { return routeFromEvents([JSON.parse(line)]) } catch {}
       }
       return undefined
     }
-    if (fs.existsSync(jsonlPath)) {
-      const content = fs.readFileSync(jsonlPath, 'utf-8')
-      for (const line of content.split('\n')) {
-        if (!line.includes('"request/context"')) continue
-        try {
-          const route = routeFromEvents([JSON.parse(line)])
-          if (route !== undefined) return route
-        } catch {}
-      }
+    const content = fs.readFileSync(logPath, 'utf-8')
+    for (const line of content.split('\n')) {
+      if (!line.includes('"request/context"')) continue
+      try {
+        const route = routeFromEvents([JSON.parse(line)])
+        if (route !== undefined) return route
+      } catch {}
     }
   } catch {}
   return undefined
