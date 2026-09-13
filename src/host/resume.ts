@@ -175,23 +175,23 @@ export async function findDanglingOpenTurns(dshHome?: string, opts?: FindInterru
           const lines = await readSessionAllLines(logPath, sinceMs)
           if (lines === undefined) continue
           let openTurn: number | undefined
-          let openTurnTime: number | undefined
           for (const line of lines) {
             try {
               const obj = JSON.parse(line)
               if (obj.type === 'turn/start' && typeof obj.data?.turn === 'number') {
                 openTurn = obj.data.turn
-                openTurnTime = typeof obj.time === 'number' ? obj.time : undefined
               } else if (obj.type === 'turn/end' && obj.data?.turn === openTurn) {
                 openTurn = undefined
-                openTurnTime = undefined
               }
             } catch {}
           }
           if (openTurn === undefined) continue
-          if (sinceMs !== undefined) {
-            if (openTurnTime === undefined || openTurnTime < sinceMs) continue
-          }
+          // The requested window is enforced by the log's mtime in
+          // readSessionAllLines: a file appended to within the window may hold
+          // a fresh crash. It must NOT be re-checked against the open turn's
+          // own start time — a turn that ran longer than the window (a real
+          // 21-minute turn on 2026-09-13) then looked old and was skipped, so a
+          // restart mid-turn triggered no auto-continue.
           interrupted.push(`${g.name}/${s.name}`)
         } catch {}
       }

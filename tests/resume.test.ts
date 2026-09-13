@@ -207,7 +207,7 @@ describe('findDanglingOpenTurns — genuinely fresh crash, no closer written yet
     expect(res.interrupted).toContain('proj/sess-multi-turn')
   })
 
-  it('respects the withinMs window using the open turn/start time', async () => {
+  it('respects the withinMs window using the log mtime', async () => {
     const dir = sessionDir('proj', 'sess-old-crash')
     const oldTime = new Date(Date.now() - 60 * 60 * 1000)
     writeJsonl(dir, [
@@ -215,6 +215,22 @@ describe('findDanglingOpenTurns — genuinely fresh crash, no closer written yet
     ], oldTime)
     const res = await findDanglingOpenTurns(tmp, { withinMs: 5 * 60 * 1000 })
     expect(res.interrupted).not.toContain('proj/sess-old-crash')
+  })
+
+  it('detects a crash whose open turn started before the window', async () => {
+    // A real long turn: it opened 21 minutes before the process died and the
+    // crash appended nothing after the `turn/start`. Keying the window on the
+    // turn's own start time skipped exactly this session, so a restart in the
+    // middle of a long turn resumed nothing (live case 2026-09-13: a 21-minute
+    // turn was interrupted and no auto-continue was triggered). The log's
+    // mtime is what says "something happened here recently".
+    const dir = sessionDir('proj', 'sess-long-turn')
+    const startedAt = Date.now() - 21 * 60 * 1000
+    writeJsonl(dir, [
+      JSON.stringify({ type: 'turn/start', time: startedAt, data: { turn: 1 } }),
+    ], new Date(Date.now() - 30 * 1000))
+    const res = await findDanglingOpenTurns(tmp, { withinMs: 5 * 60 * 1000 })
+    expect(res.interrupted).toContain('proj/sess-long-turn')
   })
 
   it('does not crash on garbage/unparseable lines', async () => {
