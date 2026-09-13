@@ -27,6 +27,8 @@ PLUGIN_DIR="${DSH_SUPERVISOR_PLUGIN_DIR:-$(cd "$(dirname "$SCRIPT_SRC")/../../..
 confirmed=false
 dry_run=false
 auto_mode=false
+check_supervisor=false
+reload_supervisor=false
 
 dry_boot_and_verify() {
   local dsh_repo="$1"
@@ -57,22 +59,125 @@ dry_boot_and_verify() {
 usage() {
   cat <<'EOF'
 Usage: restart-dsh-web.sh --repo <deepseek-harness> [--log <path>] [--confirm|--auto] [--dry-run]
+       restart-dsh-web.sh --check-supervisor
+       restart-dsh-web.sh --reload-supervisor
 
 Safely hand over the DSH Web process that owns ports 3000 and 3080.
 
 Options:
-  --repo <path>  DeepSeek Harness checkout (or set DSH_REPO).
-  --log <path>   Append-only launch log (or set DSH_RESTART_LOG).
-  --confirm      Permit a real process handover (human-gated). Required unless --dry-run.
-  --auto         Permit auto handover (supervisor, no consent prompt). Alias for --confirm with auto log prefix.
-  --dry-run      Print the resolved process tree; never stop or launch anything.
-  -h, --help     Show this help text.
+  --repo <path>        DeepSeek Harness checkout (or set DSH_REPO).
+  --log <path>         Append-only launch log (or set DSH_RESTART_LOG).
+  --confirm            Permit a real process handover (human-gated). Required unless --dry-run.
+  --auto               Permit auto handover (supervisor, no consent prompt). Alias for --confirm with auto log prefix.
+  --dry-run            Print the resolved process tree; never stop or launch anything.
+  --check-supervisor   Report supervisor-daemon freshness (fresh|stale|absent); changes nothing.
+  --reload-supervisor  Reload the daemon only when it predates the newest lib/*.js build.
+  -h, --help           Show this help text.
+
+The supervisor daemon caches this package's lib/*.js in RAM like `dsh web`
+does, and a stale daemon rolls back a healthy boot with its old rules. Every
+real restart therefore reloads it first when stale; DSH_SUPERVISOR_RELOAD_WAIT
+(seconds, default 15) bounds the wait for systemd to bring it back.
 EOF
 }
 
 fail() {
   printf '[restart] FAIL: %s\n' "$1" >&2
   exit "${2:-1}"
+}
+
+# --- supervisor daemon freshness -------------------------------------------------
+# `dsh web` is not the only process that caches this package's lib/*.js in RAM:
+# the standalone dsh-web-supervisor daemon does too, and it is the process that
+# decides whether a boot is healthy or must be rolled back. A daemon started
+# BEFORE the newest build keeps running the old rollback rules — on 2026-09-13
+# exactly that judged a slow boot as down and rolled `dsh web` back in a loop
+# ("rollback - degraded: This operation was aborted") while the port answered in
+# 1.4ms. So: never swap `dsh web` under a stale daemon.
+#
+# Only systemd owns a relaunch (dsh-web-supervisor.service has Restart=always);
+# a daemon someone started by hand has no owner to bring it back, so this step
+# reports and leaves it alone rather than killing it.
+
+# MainPID of the supervisor unit, or empty unless that pid really is the daemon.
+supervisor_main_pid() {
+  local pid cmdline
+  pid="$(systemctl --user show -p MainPID --value dsh-web-supervisor.service 2>/dev/null | tr -dc '0-9' || true)"
+  [[ -n "$pid" && "$pid" != 0 ]] || return 0
+  [[ -d "/proc/$pid" ]] || return 0
+  # Never signal a pid that is not this daemon, whatever systemd reports.
+  cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$cmdline" == *"bin.js daemon"* ]] || return 0
+  printf '%s' "$pid"
+}
+
+# Newest mtime among the package's built lib/*.js, or empty when unbuilt.
+newest_lib_mtime() {
+  local newest="" file stamp
+  for file in "$PLUGIN_DIR"/lib/*.js; do
+    [[ -f "$file" ]] || continue
+    stamp="$(stat -c %Y "$file" 2>/dev/null || true)"
+    [[ -n "$stamp" ]] || continue
+    if [[ -z "$newest" || "$stamp" -gt "$newest" ]]; then newest="$stamp"; fi
+  done
+  printf '%s' "$newest"
+}
+
+# Classify the daemon: fresh | stale | absent | unknown.
+supervisor_daemon_state() {
+  SUPERVISOR_PID="$(supervisor_main_pid)"
+  SUPERVISOR_LIB="$(newest_lib_mtime)"
+  if [[ -z "$SUPERVISOR_PID" ]]; then
+    SUPERVISOR_VERDICT=absent
+    return 0
+  fi
+  SUPERVISOR_START="$(stat -c %Y "/proc/$SUPERVISOR_PID" 2>/dev/null || true)"
+  if [[ -z "$SUPERVISOR_START" || -z "$SUPERVISOR_LIB" ]]; then
+    SUPERVISOR_VERDICT=unknown
+    return 0
+  fi
+  if (( SUPERVISOR_LIB > SUPERVISOR_START )); then
+    SUPERVISOR_VERDICT=stale
+  else
+    SUPERVISOR_VERDICT=fresh
+  fi
+}
+
+print_supervisor_state() {
+  case "$SUPERVISOR_VERDICT" in
+    fresh) printf '[restart] supervisor daemon: fresh pid=%s start=%s lib=%s\n' "$SUPERVISOR_PID" "$SUPERVISOR_START" "$SUPERVISOR_LIB" ;;
+    stale) printf '[restart] supervisor daemon: stale pid=%s start=%s lib=%s (built after this daemon started)\n' "$SUPERVISOR_PID" "$SUPERVISOR_START" "$SUPERVISOR_LIB" ;;
+    unknown) printf '[restart] supervisor daemon: unknown pid=%s (lib build time unavailable)\n' "$SUPERVISOR_PID" ;;
+    *) printf '[restart] supervisor daemon: absent\n' ;;
+  esac
+}
+
+# Reload the daemon when it predates the newest build; report the verdict either
+# way. A failed reload is fatal: continuing would hand the swap to the very
+# process that can roll it back in a loop.
+ensure_supervisor_current() {
+  supervisor_daemon_state
+  if [[ "$SUPERVISOR_VERDICT" != stale ]]; then
+    print_supervisor_state
+    return 0
+  fi
+  local old_pid="$SUPERVISOR_PID"
+  local wait_s="${DSH_SUPERVISOR_RELOAD_WAIT:-15}"
+  local new_pid=""
+  print_supervisor_state
+  printf '[restart] reloading the supervisor daemon so it runs the built lib/*.js\n'
+  kill -TERM "$old_pid" 2>/dev/null || true
+  for _ in $(seq 1 "$wait_s"); do
+    sleep 1
+    new_pid="$(supervisor_main_pid)"
+    if [[ -n "$new_pid" && "$new_pid" != "$old_pid" ]]; then break; fi
+    new_pid=""
+  done
+  if [[ -z "$new_pid" ]]; then
+    printf '[restart] FAIL: supervisor daemon %s did not come back within %ss\n' "$old_pid" "$wait_s" >&2
+    return 1
+  fi
+  printf '[restart] supervisor daemon: reloaded %s -> %s\n' "$old_pid" "$new_pid"
 }
 
 # Single-flight + log scoping (D6, spec 2026-09-13-supervisor-safety-net-design):
@@ -120,6 +225,14 @@ while (($#)); do
       dry_run=true
       shift
       ;;
+    --check-supervisor)
+      check_supervisor=true
+      shift
+      ;;
+    --reload-supervisor)
+      reload_supervisor=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -129,6 +242,18 @@ while (($#)); do
       ;;
   esac
 done
+
+# Standalone supervisor-daemon modes: they never touch dsh web, so they need no
+# --repo, no listeners and no consent.
+if [[ "$check_supervisor" == true ]]; then
+  supervisor_daemon_state
+  print_supervisor_state
+  exit 0
+fi
+if [[ "$reload_supervisor" == true ]]; then
+  ensure_supervisor_current || fail 'supervisor daemon could not be reloaded — fix it before swapping dsh web' 70
+  exit 0
+fi
 
 [[ -n "$repo" ]] || fail 'provide --repo or DSH_REPO' 64
 [[ -f "$repo/package.json" ]] || fail "repo has no package.json: $repo" 64
@@ -249,6 +374,12 @@ boot_guard_acquire
 mkdir -p "$(dirname "$marker")"
 date -Iseconds > "$marker"
 trap 'boot_guard_release; rm -f "$marker"' EXIT
+
+# Reload a stale supervisor daemon BEFORE the swap: it is the process that
+# decides whether the boot below is healthy, and a daemon running pre-build
+# rules can roll it back in a loop. Done while dsh web is still up, so the
+# fresh daemon observes the planned-restart marker written just above.
+ensure_supervisor_current || fail 'stale supervisor daemon could not be reloaded — refusing to swap dsh web under old rollback rules' 70
 
 if [[ "$systemd_managed" == true ]]; then
   # systemctl stop is a clean, intentional stop -- Restart=always does not
