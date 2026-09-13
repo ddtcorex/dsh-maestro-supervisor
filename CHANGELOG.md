@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.2] - 2026-09-13
+
+### Fixed
+
+- **The package can be published again** — three outage comments named the
+  operator's private tunnel machines, which the Release workflow's leak guard
+  rejects in a public repo. The `v0.8.1` tag died on that gate before the
+  publish step, so no `0.8.1` ever reached the registry; `0.8.2` carries the
+  same changes as `0.8.1` plus this fix.
+
 ## [0.8.1] - 2026-09-13
 
 ### Fixed
