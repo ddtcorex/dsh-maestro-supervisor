@@ -22,6 +22,7 @@
  */
 
 import { notify } from './notifier.js'
+import { repairAgentPreset, type RepairOutcome } from './preset.js'
 import {
   probeToolView,
   defaultResolveToolScope,
@@ -295,6 +296,58 @@ export function makeResumeToolHealthToolDef(ctx: any): any {
 }
 
 /**
+ * dsh.tools definition for the `maestro_repair_session_preset` host tool.
+ *
+ * The resume path repairs automatically; this tool is the operator's manual
+ * handle on the same capability: an agent that already lost its preset (a
+ * session resumed before this fix existed, for example) can be re-linked without
+ * waiting for the next restart.
+ * @param ctx - plugin context providing `agents`, `agentPresets` and the session readers.
+ * @returns the tool definition handed to `ctx.tools.register`.
+ */
+export function makeRepairPresetToolDef(ctx: any): any {
+  return {
+    name: 'maestro_repair_session_preset',
+    description:
+      "Re-link one live session's agent to the agent preset it records. Use when a resumed session lost its " +
+      'tools (every preset tool answers UNKNOWN_TOOL): the agent was published without joining a preset, and ' +
+      'recompose restores the full tool set for its next request. Reports whether the agent was repaired, ' +
+      'already composed, or could not be (no recorded preset, no live agent, recompose failed).',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'The session whose live agent should be re-linked to its preset.' },
+      },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          repaired: { type: 'boolean' },
+          presetId: { type: 'string' },
+          reason: { type: 'string' },
+          composedAfter: { type: 'string' },
+        },
+      },
+      render: (_args: any, value: any) =>
+        [{
+          type: 'text',
+          text: `repaired=${value?.repaired === true ? 'yes' : 'no'} reason=${value?.reason ?? 'unknown'} preset=${value?.presetId ?? 'none'}`,
+        }],
+    },
+    execute: async (args: any): Promise<RepairOutcome & { ok: boolean }> => {
+      const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : ''
+      if (!sessionId) return { ok: false, repaired: false, reason: 'no-preset-recorded' }
+      const outcome = await repairAgentPreset(ctx, sessionId)
+      return { ok: true, ...outcome }
+    },
+  }
+}
+
+/**
  * Register the resume-tool-health RPC handle (loopback authority) and the
  * maestro_resume_tool_health host tool. Fail-safe like the other
  * registrations: any registration error is logged, never thrown, and the
@@ -320,6 +373,13 @@ export function registerResumeToolHealthService(ctx: any): () => void {
     }
   } catch (e: any) {
     try { ctx.logger?.warn?.(`[supervisor] resume-tool-health tool registration failed: ${e?.message ?? String(e)}`) } catch {}
+  }
+  try {
+    if (typeof ctx.tools?.register === 'function') {
+      disposers.push(ctx.tools.register(makeRepairPresetToolDef(ctx)))
+    }
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] repair-preset tool registration failed: ${e?.message ?? String(e)}`) } catch {}
   }
   return () => { for (const d of disposers) { try { d() } catch {} } }
 }
