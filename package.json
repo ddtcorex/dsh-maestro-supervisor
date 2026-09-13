@@ -2,6 +2,14 @@
   "name": "@ddtcorex/dsh-maestro-supervisor",
   "version": "0.8.4",
   "description": "Supervisor daemon for DSH Web resilience — auto-detect crashes, rollback to LKG, report",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ddtcorex/dsh-maestro-supervisor.git"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
