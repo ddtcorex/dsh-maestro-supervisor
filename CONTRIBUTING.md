@@ -65,7 +65,7 @@ Run these before opening a PR (match depth to risk):
 
 ```bash
 pnpm verify      # tsc --noEmit host + tsc -p tsconfig.client.json --noEmit
-pnpm test        # vitest run (13 files, 82 tests)
+pnpm test        # vitest run
 pnpm build       # tsc host + client && node scripts/build-client.mjs -> lib/ + lib/client.js
 test -f lib/index.js && test -f lib/client.js && echo "build ok"
 ```
