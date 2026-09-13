@@ -41,10 +41,14 @@ function makeCtx(overrides: Record<string, any> = {}) {
 }
 
 /**
- * ToolsLike stub that separates the global (host) view from the per-session
- * scoped view: the global view always has every tool (the readiness poll in
- * resumeInterrupted sees bash immediately), while the scoped view reflects the
- * session's actual surface — exactly what the probe must observe.
+ * ToolsLike stub that models the split MEASURED on 2026-09-14: the deployment
+ * global layer holds only host-composition tools and never `bash` — the preset's
+ * standing mount is what contributes bash, read, write and the rest. `scopeTools`
+ * is therefore the preset/agent view; reading without a scope answers nothing.
+ *
+ * The previous stub had it backwards (a global view that always held bash), which
+ * is why the suite could not see a preset-less agent for what it was: the old
+ * pre-delivery gate polled that global view and always "passed".
  */
 function scopedTools(scopeTools: Record<string, unknown>): ToolsLike & { calls: [string, unknown][] } {
   const calls: [string, unknown][] = []
@@ -52,11 +56,10 @@ function scopedTools(scopeTools: Record<string, unknown>): ToolsLike & { calls: 
     calls,
     get: (name: string, scope?: unknown) => {
       calls.push([name, scope])
-      if (scope === undefined) return { name } // global view always has the tool
+      if (scope === undefined) return undefined // no preset layer contributes here
       return scopeTools[name]
     },
-    schemas: (scope?: unknown) =>
-      Object.keys(scope === undefined ? { bash: {}, read: {} } : scopeTools).map((name) => ({ name })),
+    schemas: (scope?: unknown) => (scope === undefined ? [] : Object.keys(scopeTools).map((name) => ({ name }))),
   }
 }
 
@@ -105,13 +108,16 @@ describe('C1 — resumed-session tool-view probe', () => {
     expect(line).toContain('registry=reachable')
   })
 
-  it('skips the probe (missing []) when ctx.tools is absent', async () => {
+  it('reports an unreadable registry instead of a healthy-looking empty probe', async () => {
     const followup = vi.fn()
-    const ctx = makeCtx({ agents: { get: () => ({ followup }) } }) // no tools service
+    const ctx = makeCtx({ agents: { get: () => ({ followup }) } }) // no tools service at all
 
     const resumed = await resumeInterrupted(ctx, ['proj/session-resumed-3'])
     expect(resumed).toEqual(['proj/session-resumed-3'])
-    expect(ctx._logs.some((l: string) => l.includes('resumed session-resumed-3'))).toBe(false)
+    // No journal line (there is nothing to observe), but the recorded probe must
+    // say the registry was unreachable — never "nothing missing".
+    const recorded = snapshotResumeToolHealth(ctx).lastResumeProbe
+    expect(recorded).toMatchObject({ missing: [], registry: 'unreachable' })
   })
 
   it('uses an injected probeToolView and scope resolver through deps', async () => {
