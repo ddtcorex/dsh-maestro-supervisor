@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { pollHealth, bootFreshness, classifyFetchFailure } from '../src/host/health-poller.js'
 import { clearPlannedRestart } from '../src/host/restart-guards.js'
 import * as guards from '../src/host/restart-guards.js'
@@ -164,5 +164,71 @@ describe('classifyFetchFailure', () => {
   it('falls back to other for anything it cannot attribute', () => {
     expect(classifyFetchFailure('http 500')).toBe('other')
     expect(classifyFetchFailure(undefined)).toBe('other')
+  })
+})
+
+describe('pollHealth boot grace (2026-09-13 incident)', () => {
+  const ABORT = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })
+  // Hermetic: the planned-restart marker is a real file under ~/.dsh, so a live
+  // supervisor daemon that recently restarted web would otherwise suppress the
+  // very poll these cases are about.
+  let markerSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(() => { markerSpy = vi.spyOn(guards, 'checkPlannedRestart').mockReturnValue(false) })
+  afterEach(() => { markerSpy.mockRestore() })
+
+  it('suppresses a timeout/abort while the boot is unproven instead of degrading', async () => {
+    // Before the fix this returned { up:true, degraded:true } (the port was
+    // still held by the previous instance, so psAlive said "alive") and the
+    // supervisor rolled back after 5 consecutive polls — the incident.
+    const res = await pollHealth({
+      fetch: async () => { throw ABORT },
+      psAlive: async () => true,
+      logTail: async () => '',
+      activeEnterAtMs: Date.now() - 78_000,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('booting')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBeFalsy()
+    expect(res.error).toBeUndefined()
+  })
+
+  it('still reports a refused connection as down while the boot is unproven', async () => {
+    // A refused connection means nothing is listening: the process is gone,
+    // and the boot grace must not mask that.
+    const res = await pollHealth({
+      fetch: async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:3082') },
+      psAlive: async () => false,
+      logTail: async () => '',
+      activeEnterAtMs: Date.now() - 10_000,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('booting')
+    expect(res.up).toBe(false)
+    expect(res.error).toContain('ECONNREFUSED')
+  })
+
+  it('judges the same timeout normally once the boot grace has expired', async () => {
+    const res = await pollHealth({
+      fetch: async () => { throw ABORT },
+      psAlive: async () => true,
+      logTail: async () => '',
+      activeEnterAtMs: Date.now() - 200_000,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('settled')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBe(true)
+  })
+
+  it('reads bootGraceMs from opts when given', async () => {
+    const res = await pollHealth({
+      fetch: async () => ({ status: 200, text: async () => 'ok' }) as any,
+      psAlive: async () => true,
+      logTail: async () => '',
+      activeEnterAtMs: Date.now() - 50_000,
+      bootGraceMs: 10_000,
+    })
+    expect(res.bootPhase).toBe('settled')
   })
 })

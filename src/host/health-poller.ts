@@ -7,19 +7,17 @@ export interface HealthState {
   error?: string
   degraded?: boolean
   logTail?: string
+  /** Boot verdict for the unit start this poll observed (see bootFreshness). */
+  bootPhase?: BootFreshness
 }
 
+/**
+ * Wall-clock epoch ms of the current dsh-web unit start, or undefined when
+ * systemd does not manage the unit (portable host) or the lookup is disabled.
+ * `ActiveEnterTimestampMonotonic` is deliberately gone: a monotonic reading
+ * cannot be compared with a timestamp-less append-only log.
+ */
 export function getActiveEnterMs(): number | undefined {
-  if (process.env.VITEST) return undefined
-  try {
-    const out = execSyncImpl('systemctl --user show -p ActiveEnterTimestampMonotonic dsh-web.service 2>/dev/null', { encoding: 'utf8' } as any) as unknown as string
-    const m = (out as string).match(/ActiveEnterTimestampMonotonic=(\d+)/)
-    if (m) return Number(m[1])
-  } catch {}
-  return undefined
-}
-
-export function getActiveEnterWallMs(): number | undefined {
   if (process.env.VITEST) return undefined
   try {
     const out = execSyncImpl('systemctl --user show -p ActiveEnterTimestamp dsh-web.service 2>/dev/null', { encoding: 'utf8' } as any) as unknown as string
@@ -34,19 +32,9 @@ export function getActiveEnterWallMs(): number | undefined {
   return undefined
 }
 
-function isRecentlyStarted(opts: PollHealthOpts, wallMs?: number): boolean {
-  if (process.env.VITEST) return false
-  const now = Date.now()
-  // 30s grace after ActiveEnterTimestamp (wall clock) — covers manual systemctl start without marker
-  const wall = wallMs ?? (() => {
-    try {
-      const fn: any = (opts as any).getActiveEnterWallMs
-      if (typeof fn === 'function') return fn()
-      return getActiveEnterWallMs()
-    } catch { return undefined }
-  })()
-  if (typeof wall === 'number' && now - wall < 30000) return true
-  return false
+/** @deprecated kept for callers; identical to getActiveEnterMs(). */
+export function getActiveEnterWallMs(): number | undefined {
+  return getActiveEnterMs()
 }
 
 export interface PollHealthOpts {
@@ -55,8 +43,12 @@ export interface PollHealthOpts {
   logTail?: () => Promise<string>
   url?: string
   timeoutMs?: number
-  /** injectable for tests — overrides systemctl lookup */
+  /** injectable for tests — overrides the systemctl lookup */
   getActiveEnterMs?: () => number | undefined
+  /** Wall-clock epoch ms of the current dsh-web unit start (see bootFreshness). */
+  activeEnterAtMs?: number
+  /** Boot budget in ms; a younger boot without its own success marker is 'booting'. */
+  bootGraceMs?: number
 }
 
 // Specific parse/boot-failure markers only. Bare 'JSON'/'YAML' were removed
@@ -150,13 +142,16 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   // high load (loadavg 12) stalls; configurable via domains.supervisor.pollTimeoutMs.
   // If opts.timeoutMs is not injected, read from supervisor config (maestro settings).
   let effectiveTimeout = opts.timeoutMs
-  if (effectiveTimeout === undefined) {
+  let bootGraceMs = opts.bootGraceMs
+  if (effectiveTimeout === undefined || bootGraceMs === undefined) {
     try {
       const { readSupervisorConfig } = await import('./config.js')
       const cfg: any = await readSupervisorConfig()
-      if (typeof cfg.pollTimeoutMs === 'number' && cfg.pollTimeoutMs > 0) effectiveTimeout = cfg.pollTimeoutMs
+      if (effectiveTimeout === undefined && typeof cfg.pollTimeoutMs === 'number' && cfg.pollTimeoutMs > 0) effectiveTimeout = cfg.pollTimeoutMs
+      if (bootGraceMs === undefined && typeof cfg.bootGraceMs === 'number' && cfg.bootGraceMs > 0) bootGraceMs = cfg.bootGraceMs
     } catch {}
     effectiveTimeout ??= 20000
+    bootGraceMs ??= 180000
   }
   const fetchFn = opts.fetch ?? defaultFetch(opts.url ?? 'http://127.0.0.1:3080/', effectiveTimeout)
   const psAliveFn = opts.psAlive ?? defaultPsAlive
@@ -183,27 +178,29 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     // ignore log read errors
   }
 
-  // Suppression gate: during 30s planned-restart window, boot transients are expected.
-  // Fetch failures are treated as suppressed (up:true), and log scanning is windowed.
+  // Suppression gate: an in-flight planned restart, or a boot that has not yet
+  // proven itself, means transients are expected. A refused connection is
+  // never suppressed: nothing is listening, so the process is gone (D2).
   const suppressed = checkPlannedRestart()
-  const recentlyStarted = isRecentlyStarted(opts as any)
-  const graceActive = suppressed || recentlyStarted
-  // ActiveEnterTimestampMonotonic lookup — primary filter source; fallback to last success window
-  let activeEnterMs: number | undefined
-  try {
-    const fn = opts.getActiveEnterMs ?? getActiveEnterMs
-    activeEnterMs = fn()
-    void activeEnterMs
-  } catch {
-    activeEnterMs = undefined
+
+  let activeEnterAtMs: number | undefined = opts.activeEnterAtMs
+  if (activeEnterAtMs === undefined) {
+    try {
+      const fn = opts.getActiveEnterMs ?? getActiveEnterMs
+      activeEnterAtMs = fn()
+    } catch {
+      activeEnterAtMs = undefined
+    }
   }
 
-  let logError: string | undefined
-  // Filter logTail to only consider lines after ActiveEnterTimestamp.
-  // Fallback: last 200 lines after last "dsh web: http" success marker (log is append-only).
   const lines = logContent.split('\n')
   const lowerLines = lines.map(l => l.toLowerCase())
-  // find last success marker
+  const currentBootSucceeded = lowerLines.some(l => l.includes('dsh web: http'))
+  const bootPhase = bootFreshness({ activeEnterAtMs, now: Date.now(), bootGraceMs, currentBootSucceeded })
+  const booting = bootPhase === 'booting'
+  const graceActive = suppressed || booting
+
+  // Log scan (Task B3 replaces this block with the boot-boundary-scoped version).
   let lastSuccessIdx = -1
   for (let i = lowerLines.length - 1; i >= 0; i--) {
     if (lowerLines[i].includes('dsh web: http')) { lastSuccessIdx = i; break }
@@ -213,7 +210,6 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   if (lastSuccessIdx !== -1) {
     const after = lines.slice(lastSuccessIdx + 1)
     const afterLower = lowerLines.slice(lastSuccessIdx + 1)
-    // keep only last 200 lines after success (fallback window)
     if (after.length > 200) {
       scanLines = after.slice(-200)
       scanLower = afterLower.slice(-200)
@@ -221,20 +217,13 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
       scanLines = after
       scanLower = afterLower
     }
-    // If ActiveEnter is available, the same window applies — old EADDRINUSE before restart
-    // is before the success marker and thus excluded. No extra timestamp->line mapping needed.
+  } else if (lines.length > 200) {
+    scanLines = lines.slice(-200)
+    scanLower = lowerLines.slice(-200)
   } else {
-    // no success marker: consider last 200 lines total (both primary and fallback)
-    if (lines.length > 200) {
-      scanLines = lines.slice(-200)
-      scanLower = lowerLines.slice(-200)
-    } else {
-      scanLines = lines
-      scanLower = lowerLines
-    }
+    scanLines = lines
+    scanLower = lowerLines
   }
-  // If ActiveEnter lookup succeeded/failed, we already applied the fallback window.
-  // When system has no success marker and no ActiveEnter, scanLines is still last 200.
   let lastErrorIdx = -1
   let matchedLine = ''
   for (let i = scanLines.length - 1; i >= 0; i--) {
@@ -248,31 +237,25 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     }
     if (lastErrorIdx !== -1) break
   }
+  let logError: string | undefined
   if (lastErrorIdx !== -1) {
-    // Within the windowed view, if a success appears after the error it would have been before the slice,
-    // but check anyway for safety (error before success within window)
     let hasSuccessAfter = false
     for (let i = lastErrorIdx + 1; i < scanLines.length; i++) {
       if (scanLower[i].includes('dsh web: http')) { hasSuccessAfter = true; break }
     }
     if (!hasSuccessAfter) logError = matchedLine
-  } else if (suppressed) {
-    // suppressed window with no windowed error — ensure stale errors before success are ignored
-    // (already handled by windowing)
   }
-  // Legacy full-scan fallback for hasSuccessAfter across original lines when no windowed error
-  // but original had error before success — already suppressed by windowing, no need to re-check.
 
-  // Distinguish FULL (http !=200) vs DEGRADED (http 200 but log has plugin error)
-  // Suppression: during 30s grace (planned-restart OR recently started), transient fetch failures are not a crash
   if (fetchError) {
-    if (graceActive) {
-      // treat fetch failed / http 404 as up:true suppressed (don't write error) — also doubles effective downThreshold
-      return {
-        up: true,
-        httpCode,
-        logTail: logContent.slice(-5000),
-      }
+    const kind = classifyFetchFailure(fetchError)
+    // D1: a timeout/abort while the current boot is unproven is a slow boot,
+    // not a crash — increment nothing. D2: a refused connection is different
+    // (nothing is listening, the process is gone) and is never masked.
+    if (booting && kind !== 'refused') {
+      return { up: true, httpCode, bootPhase, logTail: logContent.slice(-5000) }
+    }
+    if (suppressed) {
+      return { up: true, httpCode, bootPhase, logTail: logContent.slice(-5000) }
     }
     // Corroborate with a cheap port-liveness check before declaring a crash.
     // The HTTP fetch shares dsh-web's own event loop, so a busy-but-alive
@@ -288,6 +271,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
       return {
         up: true,
         httpCode,
+        bootPhase,
         error: logError ? `${fetchError} + ${logError}` : fetchError,
         degraded: true,
         logTail: logContent.slice(-5000),
@@ -296,52 +280,31 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     return {
       up: false,
       httpCode,
+      bootPhase,
       error: logError ? `${fetchError} + ${logError}` : fetchError,
       degraded: false,
       logTail: logContent.slice(-5000),
     }
   }
-  // During grace, a windowed logError that is still present is considered stale/boot transient
-  // as well — treat as up to avoid double restart. The fallback window already filters pre-restart errors.
+  // During grace, a windowed logError that is still present is considered
+  // stale/boot transient as well — treat as up to avoid double restart.
   if (graceActive && logError) {
-    // Effective downThreshold doubling is handled by supervisor, but health also suppresses log tail
-    return {
-      up: true,
-      httpCode,
-      logTail: logContent.slice(-5000),
-    }
+    return { up: true, httpCode, bootPhase, logTail: logContent.slice(-5000) }
   }
   if (logError) {
-    // EADDRINUSE is fatal even with http 200 — old process still holds 3080
-    // and new start failed; treat as FULL down so supervisor kills + restarts.
+    // EADDRINUSE is fatal even with http 200 — an old process still holds
+    // the port and the new start failed; treat as FULL down so the supervisor
+    // kills + restarts.
     const lowerErr = logError.toLowerCase()
     const isFatalPortError = lowerErr.includes('eaddrinuse') || lowerErr.includes('address already in use')
     if (isFatalPortError) {
-      return {
-        up: false,
-        httpCode,
-        error: logError,
-        degraded: false,
-        logTail: logContent.slice(-5000),
-      }
+      return { up: false, httpCode, bootPhase, error: logError, degraded: false, logTail: logContent.slice(-5000) }
     }
     // http 200 but log error → DEGRADED (isolatable), not FULL
     if (httpCode === 200) {
-      return {
-        up: true,
-        httpCode,
-        error: logError,
-        degraded: true,
-        logTail: logContent.slice(-5000),
-      }
+      return { up: true, httpCode, bootPhase, error: logError, degraded: true, logTail: logContent.slice(-5000) }
     }
-    return {
-      up: false,
-      httpCode,
-      error: logError,
-      degraded: false,
-      logTail: logContent.slice(-5000),
-    }
+    return { up: false, httpCode, bootPhase, error: logError, degraded: false, logTail: logContent.slice(-5000) }
   }
 
   // Also check psAlive as secondary signal — if fetch ok but ps dead, still down
@@ -354,7 +317,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     // ignore
   }
 
-  return { up: httpCode === 200 || httpCode === 401, httpCode, logTail: logContent.slice(-5000) }
+  return { up: httpCode === 200 || httpCode === 401, httpCode, bootPhase, logTail: logContent.slice(-5000) }
 }
 
 function defaultFetch(url: string, timeoutMs: number): () => Promise<{ status: number; text: () => Promise<string> }> {
