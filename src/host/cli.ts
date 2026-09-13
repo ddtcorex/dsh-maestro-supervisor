@@ -4,8 +4,9 @@ import { writeLKG, verifyLKG } from './snapshot.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { resolveHarnessRoot, resolveDeepseekHarnessDir } from './paths.js'
-import { buildKillStalePortsCommand, isSelfCopyError, checkPlannedRestart, writePlannedRestart, readRestartRequest, clearPlannedRestart } from './restart-guards.js'
+import { resolveHarnessRoot } from './paths.js'
+import { isSelfCopyError, checkPlannedRestart, readRestartRequest, clearPlannedRestart } from './restart-guards.js'
+import { readSupervisorConfig } from './config.js'
 
 /**
  * Copy a chosen LKG snapshot back into the DSH home. Recent snapshots are
@@ -162,44 +163,17 @@ Commands:
         }
       },
       restartWeb: async () => {
-        const { execSync } = await import('node:child_process')
-        // Single-owner: mark planned restart 30s before any systemctl/nohup
-        // so pollHealth + tick suppress the transient down (no double restart).
-        try { writePlannedRestart(30000) } catch {}
-        // Kill stale MainThread holding 3080 before any restart attempt
-        // (EADDRINUSE crash leaves old pid alive with http 200; new start would fail)
-        // Scoped to :3080 only — an unfiltered `ss -tlnp` matches every
-        // listening process on the host, not just dsh web (regression: killed
-        // unrelated services like redis/horizon on every restart).
+        // One implementation of the single-boot restart: marker (TTL = boot
+        // budget) → boot.lock → serialized systemd start → direct-node nohup
+        // only on hosts where the unit does not exist (D4/D5).
+        const { performSingleBootRestart, DEFAULT_BOOT_GRACE_MS } = await import('./restart-web.js')
+        let grace = DEFAULT_BOOT_GRACE_MS
         try {
-          execSync(buildKillStalePortsCommand(), { timeout: 5000, stdio: 'pipe' })
+          const cfg = await readSupervisorConfig()
+          if (typeof (cfg as any).bootGraceMs === 'number' && (cfg as any).bootGraceMs > 0) grace = (cfg as any).bootGraceMs
         } catch {}
-        // Prefer systemd — serialized stop → wait-inactive → start so the
-        // new process never boots while the old one still holds :3082
-        // (EADDRINUSE crash loop). Plain `systemctl restart` overlaps a
-        // slow SIGTERM stop (~90s under load).
-        try {
-          const { serializedSystemdRestart } = await import('./restart-exec.js')
-          await serializedSystemdRestart()
-          console.log('[supervisor] restarted dsh-web via systemd (stop-wait-start)')
-          return
-        } catch {}
-        // Check if unit exists but not active — try start
-        try {
-          execSync('systemctl --user start dsh-web.service', { timeout: 15000, stdio: 'pipe' })
-          console.log('[supervisor] started dsh-web via systemd (fallback)')
-          return
-        } catch {}
-        // Last fallback: detached direct node (portable — sources nvm directly, falls back to system node)
-        try {
-          const harnessRoot = resolveDeepseekHarnessDir()
-          const logPath = path.join(os.homedir(), '.dsh/dsh-web.log')
-          try { writePlannedRestart(30000) } catch {}
-          execSync(`setsid nohup bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; cd ${JSON.stringify(harnessRoot)} && exec node --import tsx/esm apps/cli/src/bin.ts web --no-open >> ${JSON.stringify(logPath)} 2>&1' &`, { timeout: 5000 })
-          console.log('[supervisor] started dsh-web via nohup fallback (direct node, portable)')
-        } catch (e: any) {
-          throw new Error(`restartWeb failed: ${e?.message ?? String(e)}`)
-        }
+        const res = await performSingleBootRestart({ bootGraceMs: grace })
+        if (!res.restarted) console.log(`[supervisor] restart skipped: ${res.reason ?? 'boot lock held'}`)
       },
       notify: async (msg) => console.log(`[notify] ${msg}`),
       isPlannedRestartActive: () => checkPlannedRestart(),
