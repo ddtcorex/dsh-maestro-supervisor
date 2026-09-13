@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.8.4] - 2026-09-14
+
+### Fixed
+
+- **A resumed session keeps its agent preset** — `agents.resume()` composes an
+  agent's scoped world only through `ResumeAgentOptions.setup`, and the resume
+  path passed none, so every auto-resumed session was published joined to no
+  preset: its tool view collapsed to the deployment-global layer and every
+  preset tool (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `subagent`,
+  `skill`, `todo_write`, `workflow`, `cordis_*`, goal/plan/jobs) answered
+  `Error: unknown tool "bash"` for the rest of that agent's life. Measured on
+  the live incident: the resume header carried 76 tools instead of 110, and
+  `agentPresets.composedPreset(agent.ctx)` was `undefined` where a healthy
+  session answers `cordis`. Activation now delegates to
+  `sessionController.resolveAgent` — the entry point the Web API itself uses,
+  which composes the preset, de-duplicates concurrent resumes and returns the
+  live agent when the browser already re-opened the session — and falls back to
+  `agents.resume` with `setup: agentPresets.mount(agentCtx, presetId)`, reading
+  the preset the session records (projection, then persisted header, then raw
+  log header). A session that records no preset still resumes bare, which is
+  correct for agents created outside the Web app.
+- **A preset that cannot be composed no longer degrades into a preset-less
+  resume** — the `setup` failure is wrapped in `PresetComposeError`, that one
+  session is skipped with a `resume-failed` journal entry and an operator
+  notification, and the remaining sessions still resume.
+- **An unreadable tool registry is no longer reported as healthy** — the probe
+  returned `{missing: [], visible: 0}` both when nothing was missing and when it
+  could not read the registry at all, which is how the loss above stayed
+  invisible (`maestro_resume_tool_health` printed `missing=none visible=0`).
+  Probes now carry `registry: reachable | unreachable`, and the health output
+  renders `registry=… composed=… repaired=…` beside the tool view.
+- **Removed the pre-delivery `bash` readiness wait** — it polled the global
+  registry for `bash`, which never holds a preset tool (measured), so it could
+  only exhaust its budget and continue anyway; composition is now verified
+  against the preset roster instead.
+
+### Added
+
+- **`maestro_repair_session_preset`** — re-links one live session's agent to the
+  preset that session records (`agentPresets.recompose`, which for an agent with
+  no binding is its first bind). It repairs an agent that lost its preset before
+  this release without waiting for a restart, and reports `repaired`,
+  `already-composed`, `no-preset-recorded`, `no-live-agent` or
+  `recompose-failed`.
+- **Automatic repair on resume (`resumeAutoRepair`, default `true`)** — after a
+  resumed agent is activated the roster is asked
+  (`composedPreset(agent.ctx)`) and a preset-less agent is re-linked before the
+  recovery prompt is delivered, so the turn the prompt starts already carries
+  the preset's tools. The check is skipped when it cannot be made (no roster
+  service, or an agent without its own context), and the config key is the kill
+  switch for this live re-link (`setup`/`tools/change`); with it off the loss is
+  still notified and parked.
+
 ## [0.8.3] - 2026-09-14
 
 ### Fixed
