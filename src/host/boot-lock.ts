@@ -29,6 +29,12 @@ export interface BootLockDeps {
   portUp?: () => Promise<boolean>
   waitTimeoutMs?: number
   pollMs?: number
+  /**
+   * Owner recorded in the lock file; defaults to this process. The skill script
+   * (D6) holds the lock with the shell's own PID, so liveness stays meaningful
+   * while the shell performs the restart.
+   */
+  pid?: number
 }
 
 export interface BootLock {
@@ -65,6 +71,7 @@ function resolved(deps: BootLockDeps) {
     portUp: deps.portUp ?? defaultPortUp,
     waitTimeoutMs: deps.waitTimeoutMs ?? DEFAULT_BOOT_LOCK_STALE_MS,
     pollMs: deps.pollMs ?? 3_000,
+    pid: deps.pid ?? process.pid,
   }
 }
 
@@ -80,7 +87,7 @@ function parseLock(raw: string | undefined): { pid: number; ts: number } | undef
 /** Take the boot lock, or return undefined when another live boot owns it. */
 export function acquireBootLock(deps: BootLockDeps = {}): BootLock | undefined {
   const d = resolved(deps)
-  const body = JSON.stringify({ pid: process.pid, ts: d.now() })
+  const body = JSON.stringify({ pid: d.pid, ts: d.now() })
   const take = (): BootLock | undefined =>
     d.createExclusive(d.lockPath, body) ? { path: d.lockPath, release: () => d.remove(d.lockPath) } : undefined
   const first = take()
@@ -90,6 +97,18 @@ export function acquireBootLock(deps: BootLockDeps = {}): BootLock | undefined {
   if (!stale) return undefined
   d.remove(d.lockPath)
   return take()
+}
+
+/**
+ * Release the lock only when `pid` still owns it. A boot that lost the race (or
+ * whose stale lock was taken over) must never delete the winner's lock file.
+ */
+export function releaseBootLock(pid: number, deps: BootLockDeps = {}): boolean {
+  const d = resolved(deps)
+  const existing = parseLock(d.readLock(d.lockPath))
+  if (existing === undefined || existing.pid !== pid) return false
+  d.remove(d.lockPath)
+  return true
 }
 
 async function defaultPortUp(): Promise<boolean> {

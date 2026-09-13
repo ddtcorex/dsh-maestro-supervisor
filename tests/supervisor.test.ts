@@ -137,6 +137,48 @@ describe('supervisor', () => {
     expect(rollback).toHaveBeenCalledTimes(1)
   })
 
+  // D4 — the rollback summary is not decoration: a restore that could not put
+  // every entry back must reach the operator loudly, not look like a clean
+  // recovery in the log.
+  it('surfaces a partial rollback loudly, with the skipped entries', async () => {
+    const notify = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'ERR_MODULE_NOT_FOUND' }),
+      writeLKG: vi.fn(async () => ({ ts: '' })),
+      writeFailed: vi.fn(async () => ({ ts: 'failed-ts' })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: vi.fn(async () => ({
+        target: '2026-08-31T00-00-00-000Z',
+        restored: 42,
+        skipped: [{ path: 'attachments', reason: 'runtime data excluded from the LKG scope' }],
+      })),
+      notify,
+      intervalMs: 10,
+      debounceMs: 0,
+      downThreshold: 1,
+    })
+    await s.tick()
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('ROLLBACK PARTIAL'))
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('attachments'))
+  })
+
+  it('does not announce a partial rollback when every entry was restored', async () => {
+    const notify = vi.fn(async () => {})
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: false, error: 'ERR_MODULE_NOT_FOUND' }),
+      writeLKG: vi.fn(async () => ({ ts: '' })),
+      writeFailed: vi.fn(async () => ({ ts: 'failed-ts' })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: vi.fn(async () => ({ target: '2026-08-31T00-00-00-000Z', restored: 42, skipped: [] })),
+      notify,
+      intervalMs: 10,
+      debounceMs: 0,
+      downThreshold: 1,
+    })
+    await s.tick()
+    expect(notify).not.toHaveBeenCalledWith(expect.stringContaining('ROLLBACK PARTIAL'))
+  })
+
   it('resets the consecutive-down count when health recovers between down polls', async () => {
     const states: Array<{ up: boolean; error?: string }> = [
       { up: false, error: 'aborted' },

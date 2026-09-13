@@ -208,6 +208,40 @@ describe('pollHealth boot grace (2026-09-13 incident)', () => {
     expect(res.error).toContain('ECONNREFUSED')
   })
 
+  it('treats a refused connection as a boot symptom while the process is verifiably alive (D5)', async () => {
+    // During the boot window the raw webserver may not be bound yet even though
+    // the process holds the port: nothing to degrade for, and the counters must
+    // stay untouched. A refused connection with psAlive() === false still counts
+    // (previous case) — the aliveness probe is what separates the two.
+    const res = await pollHealth({
+      fetch: async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:3082') },
+      psAlive: async () => true,
+      logTail: async () => '',
+      activeEnterAtMs: Date.now() - 10_000,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('booting')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBeFalsy()
+    expect(res.error).toBeUndefined()
+  })
+
+  it('judges a refused-but-alive connection normally once the boot grace has expired', async () => {
+    // D5 is scoped to the unproven boot: after the window the existing
+    // psAlive-based degraded verdict applies, exactly as before.
+    const res = await pollHealth({
+      fetch: async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:3082') },
+      psAlive: async () => true,
+      logTail: async () => '',
+      activeEnterAtMs: Date.now() - 200_000,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('settled')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBe(true)
+    expect(res.error).toContain('ECONNREFUSED')
+  })
+
   it('judges the same timeout normally once the boot grace has expired', async () => {
     const res = await pollHealth({
       fetch: async () => { throw ABORT },

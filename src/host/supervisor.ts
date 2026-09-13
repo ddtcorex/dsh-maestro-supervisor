@@ -12,12 +12,19 @@ import { writeRestartOutcome as defaultWriteOutcome, type RestartOutcome } from 
 import { execFileSync } from 'node:child_process'
 import { mintDshSessionCookie, type MintCookieOpts } from './dsh-session.js'
 
+/** Partial-restore report a rollback may hand back (cli.ts wires RestoreResult). */
+export interface RollbackSummary {
+  target?: string
+  restored?: number
+  skipped?: Array<{ path: string; reason: string }>
+}
+
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
-  writeLKG: () => Promise<{ ts: string; manifest: any }>
-  writeFailed: () => Promise<{ ts: string; manifest: any }>
+  writeLKG: () => Promise<{ ts: string; manifest?: any }>
+  writeFailed: () => Promise<{ ts: string; manifest?: any }>
   writeReport: (opts: { ts: string; health: HealthState; action: string; logTail?: string; gitDiff?: string }) => Promise<string>
-  rollback: (ts?: string) => Promise<void>
+  rollback: (ts?: string) => Promise<RollbackSummary | void>
   restartWeb?: () => Promise<void>
   notify: (msg: string) => Promise<void>
   intervalMs?: number
@@ -362,6 +369,19 @@ export class Supervisor {
     }
   }
 
+  /**
+   * D4: a restore that could not put every entry back must be surfaced loudly.
+   * Without this, a half-restored tree reads exactly like a clean recovery in
+   * the log and in the operator's Telegram feed.
+   */
+  private async reportRollbackResult(summary: RollbackSummary | void, reportPath: string): Promise<void> {
+    if (!summary || !summary.skipped?.length) return
+    const first = summary.skipped.slice(0, 3).map(s => `${s.path} (${s.reason})`).join('; ')
+    await this.deps.notify(
+      `ROLLBACK PARTIAL: ${summary.restored ?? 0} restored, ${summary.skipped.length} skipped — ${first} (report: ${reportPath})`,
+    ).catch(() => {})
+  }
+
   private handleDebugResult(reportPath: string, res: { fixed: boolean; reason: string }): void {
     if (res.fixed) {
       void this.deps.notify(`FIXED: debug-agent fixed ${reportPath} — ${res.reason}`).catch(() => {})
@@ -500,7 +520,10 @@ export class Supervisor {
         const gitDiff2 = await this.collectGitDiff().catch(() => '')
         const degradedHealth: HealthState = { up: false, httpCode: health.httpCode, error: `degraded → down: ${degradedError}`, logTail: logTail2, degraded: false }
         const reportPath2 = await this.deps.writeReport({ ts: ts2, health: degradedHealth, action: `rollback — degraded: ${degradedError}`, logTail: logTail2, gitDiff: gitDiff2 }).catch(() => '')
-        try { await this.deps.rollback() } catch (e: any) { await this.deps.notify(`rollback failed: ${e?.message ?? String(e)} (report: ${reportPath2})`).catch(() => {}) }
+        try {
+          const summary = await this.deps.rollback()
+          await this.reportRollbackResult(summary, reportPath2)
+        } catch (e: any) { await this.deps.notify(`rollback failed: ${e?.message ?? String(e)} (report: ${reportPath2})`).catch(() => {}) }
         if (this.deps.restartWeb) {
           try { await this.deps.restartWeb(); await this.deps.notify(`restarted dsh-web after rollback (report: ${reportPath2})`).catch(() => {}) } catch (e: any) { await this.deps.notify(`restart dsh-web failed: ${e?.message ?? String(e)} (report: ${reportPath2})`).catch(() => {}) }
         }
@@ -630,7 +653,8 @@ export class Supervisor {
       const gitDiff = await this.collectGitDiff().catch(() => '')
       const reportPath = await this.deps.writeReport({ ts, health, action: `rollback — ${health.error ?? 'down'}`, logTail, gitDiff }).catch(() => '')
       try {
-        await this.deps.rollback()
+        const summary = await this.deps.rollback()
+        await this.reportRollbackResult(summary, reportPath)
       } catch (e: any) {
         await this.deps.notify(`rollback failed: ${e?.message ?? String(e)} (report: ${reportPath})`).catch(() => {})
       }
