@@ -5,6 +5,59 @@ import * as crypto from 'node:crypto'
 interface ManifestEntry { path: string; sha256: string }
 interface Manifest { ts: string; files: ManifestEntry[] }
 
+export interface SnapshotResult {
+  ts: string
+  /** Files (and symlinks) copied into this snapshot. */
+  files: number
+  /** Entries that could not be copied; the snapshot stays usable either way. */
+  skipped: Array<{ path: string; reason: string }>
+}
+
+/**
+ * DSH-home entries the last-known-good snapshot deliberately never copies.
+ *
+ * The LKG exists to recover a boot that fails while loading the plugin tree, so
+ * it holds boot **configuration**: `profiles/` (the plugin tree with its
+ * lockfile, `cordis.patch.yml` and sidecars), the per-plugin config directories
+ * and the settings documents. Everything below is runtime **data** — it is
+ * written continuously while `dsh web` runs, so restoring a snapshot of it can
+ * only lose newer state, and some of it is hostile to a bulk copy:
+ *
+ * - `sessions/` — append-only transcripts. Restoring a stale copy over live
+ *   sessions drops every turn recorded after the snapshot, i.e. the recovery
+ *   path would lose the log it is supposed to protect.
+ * - `attachments/` — content-addressed blobs stored mode `0400`. That read-only
+ *   bit is exactly what made the 2026-09-13 rollback abort with
+ *   `EACCES: Permission denied '.../attachments/v1/objects/f8'`.
+ * - `plugins-src/` — plugin source cache, re-fetched on demand (~400 MB host).
+ * - `.supervisor/` — the LKG root itself lives inside the DSH home, so copying
+ *   it would recurse into every retained snapshot.
+ *
+ * This list is data, not a heuristic: the copy loop and the restore loop both
+ * consult `isLkgExcluded()`, and the table test pins the rule.
+ */
+export const LKG_EXCLUDED_ENTRIES: readonly string[] = [
+  'sessions',
+  'attachments',
+  'plugins-src',
+  '.supervisor',
+]
+
+/**
+ * True when a DSH-home-relative path must never enter (or leave) the LKG.
+ *
+ * The named entries match the first path segment; `*.log` matches by basename
+ * anywhere, because append-only logs are data at any depth and a restored stale
+ * `dsh-web.log` would poison the boot-boundary scan.
+ */
+export function isLkgExcluded(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
+  const segments = normalized.split('/').filter(s => s.length > 0 && s !== '.')
+  if (!segments.length) return false
+  if (LKG_EXCLUDED_ENTRIES.includes(segments[0]!)) return true
+  return segments[segments.length - 1]!.endsWith('.log')
+}
+
 function sha256File(filePath: string): string {
   const data = fs.readFileSync(filePath)
   return crypto.createHash('sha256').update(data).digest('hex')
@@ -20,7 +73,7 @@ function walkFiles(dir: string, base: string = dir): string[] {
   return out
 }
 
-export async function writeLKG(dshHome: string, lkgRoot: string): Promise<{ ts: string; manifest: Manifest }> {
+export async function writeLKG(dshHome: string, lkgRoot: string): Promise<SnapshotResult> {
   // Dedupe: skip snapshot if current state identical to latest LKG (prevents 5-min unconditional growth)
   try {
     if (await isDuplicateLKG(dshHome, lkgRoot)) {
@@ -30,7 +83,7 @@ export async function writeLKG(dshHome: string, lkgRoot: string): Promise<{ ts: 
       const latest = entries[entries.length - 1]
       const manifestPath = path.join(lkgRoot, latest, 'manifest.json')
       const manifest: Manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
-      return { ts: latest, manifest }
+      return { ts: latest, files: manifest.files?.length ?? 0, skipped: [] }
     }
   } catch {}
 
@@ -38,13 +91,17 @@ export async function writeLKG(dshHome: string, lkgRoot: string): Promise<{ ts: 
   const dest = path.join(lkgRoot, ts)
   fs.mkdirSync(dest, { recursive: true })
 
-  // Copy DSH home contents (if exists, copy recursively) — skip .supervisor to avoid recursion
+  // Copy only the boot configuration (D1). The per-entry filter applies
+  // `isLkgExcluded()` at every depth, so a nested `*.log` is left behind too.
   if (fs.existsSync(dshHome)) {
     for (const entry of fs.readdirSync(dshHome)) {
-      if (entry === '.supervisor') continue;
+      if (isLkgExcluded(entry)) continue
       const src = path.join(dshHome, entry)
       const dst = path.join(dest, entry)
-      fs.cpSync(src, dst, { recursive: true })
+      fs.cpSync(src, dst, {
+        recursive: true,
+        filter: (source: string) => !isLkgExcluded(path.relative(dshHome, source)),
+      })
     }
   }
 
@@ -62,7 +119,7 @@ export async function writeLKG(dshHome: string, lkgRoot: string): Promise<{ ts: 
   await pruneByAge(lkgRoot, 7 * 24 * 60 * 60 * 1000).catch(() => {})
   await pruneBySize(lkgRoot, 5 * 1024 * 1024 * 1024).catch(() => {})
 
-  return { ts, manifest }
+  return { ts, files: manifest.files.length, skipped: [] }
 }
 
 export async function pruneByAge(root: string, maxAgeMs: number): Promise<void> {
@@ -129,7 +186,9 @@ export async function isDuplicateLKG(dshHome: string, lkgRoot: string): Promise<
       let newestFileMtime = 0
       if (fs.existsSync(dshHome)) {
         for (const entry of fs.readdirSync(dshHome)) {
-          if (entry === '.supervisor') continue
+          // Same scope as the copy loop: runtime data changes constantly and
+          // must not defeat the dedupe for the configuration being snapshotted.
+          if (isLkgExcluded(entry)) continue
           try {
             const s = fs.statSync(path.join(dshHome, entry))
             if (s.mtimeMs > newestFileMtime) newestFileMtime = s.mtimeMs
@@ -170,6 +229,6 @@ export async function rotateLKG(lkgRoot: string, keep = 3): Promise<void> {
   }
 }
 
-export async function writeFailed(dshHome: string, failedRoot: string): Promise<{ ts: string; manifest: Manifest }> {
+export async function writeFailed(dshHome: string, failedRoot: string): Promise<SnapshotResult> {
   return writeLKG(dshHome, failedRoot)
 }

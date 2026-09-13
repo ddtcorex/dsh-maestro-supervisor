@@ -14,8 +14,8 @@ import { mintDshSessionCookie, type MintCookieOpts } from './dsh-session.js'
 
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
-  writeLKG: () => Promise<{ ts: string; manifest: any }>
-  writeFailed: () => Promise<{ ts: string; manifest: any }>
+  writeLKG: () => Promise<{ ts: string; manifest?: any }>
+  writeFailed: () => Promise<{ ts: string; manifest?: any }>
   writeReport: (opts: { ts: string; health: HealthState; action: string; logTail?: string; gitDiff?: string }) => Promise<string>
   rollback: (ts?: string) => Promise<void>
   restartWeb?: () => Promise<void>
