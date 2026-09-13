@@ -86,7 +86,7 @@ export type BootFreshness = 'unknown' | 'booting' | 'settled'
  * - 'unknown' — no boot anchor (systemd absent, lookup disabled, clock skew):
  *               behave exactly as before the fix; never suppress anything.
  * - 'booting' — the unit started less than `bootGraceMs` ago and has not yet
- *               proven itself with its own success marker: weak failures are
+ *               proven itself by actually serving a request: weak failures are
  *               suppressed and log lines are inconclusive.
  * - 'settled' — the boot proved itself, or the grace window expired: judge
  *               normally.
@@ -95,12 +95,21 @@ export function bootFreshness(opts: {
   activeEnterAtMs?: number
   now: number
   bootGraceMs: number
-  currentBootSucceeded: boolean
+  /**
+   * Did THIS poll receive a serving response (200/401)?
+   *
+   * Deliberately not "the log shows `dsh web: http`": that line is printed the
+   * moment the raw webserver binds, seconds into a boot that can take ~90s to
+   * finish loading the plugin tree. Crediting it as proof ended the grace while
+   * the proxy in front was still coming up, so probes that hung during the rest
+   * of the boot were judged as crashes — the 2026-09-13 restart loop.
+   */
+  probeSucceeded: boolean
 }): BootFreshness {
-  const { activeEnterAtMs, now, bootGraceMs, currentBootSucceeded } = opts
+  const { activeEnterAtMs, now, bootGraceMs, probeSucceeded } = opts
   if (activeEnterAtMs === undefined || !Number.isFinite(activeEnterAtMs)) return 'unknown'
   if (now < activeEnterAtMs) return 'unknown'
-  if (currentBootSucceeded) return 'settled'
+  if (probeSucceeded) return 'settled'
   return now - activeEnterAtMs < bootGraceMs ? 'booting' : 'settled'
 }
 
@@ -233,8 +242,9 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     && activeEnterAtMs - boundaryMs <= bootGraceMs
   const bootLines = scopedToThisBoot ? lines.slice(boundaryIdx + 1) : lines
   const bootLower = scopedToThisBoot ? lowerLines.slice(boundaryIdx + 1) : lowerLines
-  const currentBootSucceeded = scopedToThisBoot && bootLower.some(l => l.includes(SUCCESS_MARKER))
-  const bootPhase = bootFreshness({ activeEnterAtMs, now, bootGraceMs, currentBootSucceeded })
+  // Proof of a finished boot is a serving probe, not a log line (see bootFreshness).
+  const probeSucceeded = httpCode === 200 || httpCode === 401
+  const bootPhase = bootFreshness({ activeEnterAtMs, now, bootGraceMs, probeSucceeded })
   const booting = bootPhase === 'booting'
   const graceActive = suppressed || booting
 

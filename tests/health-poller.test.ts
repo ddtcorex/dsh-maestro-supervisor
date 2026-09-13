@@ -121,23 +121,23 @@ describe('bootFreshness', () => {
   const GRACE = 180_000
 
   it('is unknown without a boot anchor (systemd absent) so nothing is suppressed', () => {
-    expect(bootFreshness({ activeEnterAtMs: undefined, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('unknown')
+    expect(bootFreshness({ activeEnterAtMs: undefined, now: NOW, bootGraceMs: GRACE, probeSucceeded: false })).toBe('unknown')
   })
 
   it('is unknown when the anchor is in the future (clock skew)', () => {
-    expect(bootFreshness({ activeEnterAtMs: NOW + 1, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('unknown')
+    expect(bootFreshness({ activeEnterAtMs: NOW + 1, now: NOW, bootGraceMs: GRACE, probeSucceeded: false })).toBe('unknown')
   })
 
   it('is booting while the grace is open and this boot has printed no success marker', () => {
-    expect(bootFreshness({ activeEnterAtMs: NOW - 78_000, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('booting')
+    expect(bootFreshness({ activeEnterAtMs: NOW - 78_000, now: NOW, bootGraceMs: GRACE, probeSucceeded: false })).toBe('booting')
   })
 
   it("is settled as soon as this boot's own success marker was seen", () => {
-    expect(bootFreshness({ activeEnterAtMs: NOW - 5_000, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: true })).toBe('settled')
+    expect(bootFreshness({ activeEnterAtMs: NOW - 5_000, now: NOW, bootGraceMs: GRACE, probeSucceeded: true })).toBe('settled')
   })
 
   it('is settled once the grace expired without a success marker', () => {
-    expect(bootFreshness({ activeEnterAtMs: NOW - GRACE, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('settled')
+    expect(bootFreshness({ activeEnterAtMs: NOW - GRACE, now: NOW, bootGraceMs: GRACE, probeSucceeded: false })).toBe('settled')
   })
 })
 
@@ -251,6 +251,30 @@ describe('log scan scoping (2026-09-13 incident log shape)', () => {
     '[workspace] loading plugin tree…',
   ].join('\n')
 
+  const incidentLogWithEarlyMarker = [
+    'dsh web: http://127.0.0.1:3082/?token=previous-boot',
+    'Error: listen EADDRINUSE: address already in use 127.0.0.1:3082',
+    `${BOOT_BOUNDARY_MARKER} ${new Date(BOUNDARY_AT).toISOString()}`,
+    'dsh web: http://127.0.0.1:3082/?token=this-boot',
+    '[workspace] loading plugin tree…',
+  ].join('\n')
+
+  it('does not treat an early success marker as proof while the probe still hangs', async () => {
+    // 2026-09-13 restart loop: the marker above is printed when the RAW webserver
+    // binds, not when the tree serves. Crediting it ended the grace and every
+    // hung probe during the remaining boot counted as a crash.
+    const res = await pollHealth({
+      fetch: async () => { throw ABORT },
+      psAlive: async () => true,
+      logTail: async () => incidentLogWithEarlyMarker,
+      activeEnterAtMs: ACTIVE_ENTER_AT,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('booting')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBeFalsy()
+  })
+
   it('never reads the previous boot EADDRINUSE as this boot when the scan is scoped', async () => {
     const res = await pollHealth({
       fetch: async () => ({ status: 200, text: async () => 'ok' }) as any,
@@ -259,7 +283,10 @@ describe('log scan scoping (2026-09-13 incident log shape)', () => {
       activeEnterAtMs: ACTIVE_ENTER_AT,
       bootGraceMs: 180_000,
     })
-    expect(res.bootPhase).toBe('booting')
+    // This poll answered (200), so the boot is proven and judged normally; the
+    // incident's shape — a probe that hangs while the tree is still coming up —
+    // is the 'booting' case covered above.
+    expect(res.bootPhase).toBe('settled')
     expect(res.up).toBe(true)
     expect(res.degraded).toBeFalsy()
     expect(res.error).toBeUndefined()
