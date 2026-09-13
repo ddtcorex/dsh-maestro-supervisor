@@ -83,7 +83,7 @@ function walkFiles(dir: string, base: string = dir): string[] {
 }
 
 /** Human-readable, bounded reason for a per-entry copy failure. */
-function failureReason(e: unknown): string {
+export function failureReason(e: unknown): string {
   const err = e as any
   const code = typeof err?.code === 'string' && err.code ? `${err.code}: ` : ''
   const message = typeof err?.message === 'string' ? err.message : String(e)

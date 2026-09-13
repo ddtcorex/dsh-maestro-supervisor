@@ -1,6 +1,6 @@
 import { Supervisor } from './supervisor.js'
 import { pollHealth } from './health-poller.js'
-import { writeLKG, verifyLKG } from './snapshot.js'
+import { writeLKG, verifyLKG, isLkgExcluded, failureReason } from './snapshot.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -8,15 +8,83 @@ import { resolveHarnessRoot } from './paths.js'
 import { isSelfCopyError, checkPlannedRestart, readRestartRequest, clearPlannedRestart } from './restart-guards.js'
 import { readSupervisorConfig } from './config.js'
 
+export interface RestoreResult {
+  /** Snapshot id that was restored. */
+  target: string
+  /** Files (and symlinks) restored into the live DSH home. */
+  restored: number
+  /** Entries that were not restored, each with a reason. Never silent. */
+  skipped: Array<{ path: string; reason: string }>
+}
+
+/**
+ * Make a destination (recursively) writable before overwriting it (D3).
+ *
+ * `fs.cpSync` copies into an existing destination file with
+ * `O_WRONLY|O_CREAT|O_TRUNC`, so a mode-`0400` object fails with EACCES and
+ * aborts the whole restore — the exact 2026-09-13 failure
+ * (`EACCES, Permission denied '.../attachments/v1/objects/f8'`). Only entries
+ * that actually lack the needed bit are chmod-ed, so a healthy tree costs
+ * stats, not a chmod per file.
+ */
+function makeWritable(target: string): void {
+  let st: fs.Stats
+  try {
+    st = fs.lstatSync(target)
+  } catch {
+    return
+  }
+  if (st.isSymbolicLink()) return
+  if (st.isDirectory()) {
+    if ((st.mode & 0o300) !== 0o300) {
+      try { fs.chmodSync(target, st.mode | 0o300) } catch {}
+    }
+    let names: string[] = []
+    try { names = fs.readdirSync(target) } catch { return }
+    for (const name of names) makeWritable(path.join(target, name))
+    return
+  }
+  if ((st.mode & 0o200) === 0) {
+    try { fs.chmodSync(target, st.mode | 0o200) } catch {}
+  }
+}
+
+/** Files (and symlinks) a restore of this source entry would write. */
+function countRestorable(srcPath: string): number {
+  try {
+    const st = fs.lstatSync(srcPath)
+    if (st.isDirectory()) return walkFiles(srcPath).length
+    return 1
+  } catch {
+    return 0
+  }
+}
+
+function walkFiles(dir: string, base: string = dir): string[] {
+  const out: string[] = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...walkFiles(full, base))
+    else if (entry.isFile()) out.push(path.relative(base, full))
+  }
+  return out
+}
+
 /**
  * Copy a chosen LKG snapshot back into the DSH home. Recent snapshots are
  * tried newest-first, skipping any that still carry a failing plugin so a
- * broken bundle is not restored. `sessions/` is deliberately NOT restored —
- * session logs are append-only truth and rolling them back to a snapshot
- * would drop every turn recorded after that snapshot.
- * @returns the rolled-back snapshot id.
+ * broken bundle is not restored. `sessions/` and every other runtime-data entry
+ * is deliberately NOT restored (D1) — session logs are append-only truth and
+ * rolling them back to a snapshot would drop every turn recorded after that
+ * snapshot.
+ *
+ * Never throws for a per-entry failure: the failures are collected into
+ * `skipped` and the caller reports them (D2/D4). The only throw left is "there
+ * is no snapshot at all", which the caller must know about.
+ *
+ * @returns the restore summary (snapshot id + what was/was not restored).
  */
-export async function rollbackLKG(opts: { dshHome: string; lkgRoot: string; failingPlugin?: string }): Promise<string> {
+export async function rollbackLKG(opts: { dshHome: string; lkgRoot: string; failingPlugin?: string }): Promise<RestoreResult> {
   const { dshHome, lkgRoot, failingPlugin } = opts
   const entries = fs.existsSync(lkgRoot) ? fs.readdirSync(lkgRoot).sort() : []
   if (!entries.length) throw new Error('no LKG to rollback to')
@@ -37,10 +105,15 @@ export async function rollbackLKG(opts: { dshHome: string; lkgRoot: string; fail
   }
   const target = chosen ?? entries[entries.length - 1]
   const src = path.join(lkgRoot, target)
+  const skipped: RestoreResult['skipped'] = []
+  let restored = 0
   for (const entry of fs.readdirSync(src)) {
     if (entry === 'manifest.json') continue
-    if (entry === 'sessions') {
-      console.log('[supervisor] rollback keeps live sessions (append-only truth) — skipping sessions/')
+    if (isLkgExcluded(entry)) {
+      // Legacy snapshots (taken before D1) still carry runtime data. Restoring
+      // a stale sessions/ over live sessions can lose a log, and a 0400
+      // attachment blob is what aborted this very path — report, never restore.
+      skipped.push({ path: entry, reason: 'runtime data excluded from the LKG scope (not required to boot)' })
       continue
     }
     const srcPath = path.join(src, entry)
@@ -50,13 +123,15 @@ export async function rollbackLKG(opts: { dshHome: string; lkgRoot: string; fail
       try {
         if (fs.existsSync(srcPath) && fs.existsSync(destPath) && fs.realpathSync(srcPath) === fs.realpathSync(destPath)) continue
       } catch {}
+      makeWritable(destPath)
       fs.cpSync(srcPath, destPath, { recursive: true, force: true })
+      restored += countRestorable(srcPath)
     } catch (e: any) {
       if (isSelfCopyError(String(e?.message ?? ''))) continue
-      throw e
+      skipped.push({ path: entry, reason: failureReason(e) })
     }
   }
-  return target
+  return { target, restored, skipped }
 }
 
 export async function runCli(args: string[]): Promise<void> {
@@ -152,8 +227,14 @@ Commands:
           const m = tail.match(/@ddtcorex\/dsh-maestro-[a-z0-9_-]+/i) ?? tail.match(/dsh-maestro-[a-z0-9_-]+/i)
           if (m) failingPlugin = m[0].replace(/^@ddtcorex\//, '')
         } catch {}
-        const target = await rollbackLKG({ dshHome, lkgRoot, failingPlugin })
-        console.log(`[supervisor] rolled back to ${target}${failingPlugin ? ` (avoiding ${failingPlugin})` : ''}`)
+        const res = await rollbackLKG({ dshHome, lkgRoot, failingPlugin })
+        console.log(`[supervisor] rolled back to ${res.target} — ${res.restored} file(s) restored${failingPlugin ? ` (avoiding ${failingPlugin})` : ''}`)
+        // D4: a partial restore is surfaced loudly, never silently.
+        if (res.skipped.length) {
+          console.log(`[supervisor] ROLLBACK PARTIAL: ${res.skipped.length} entr(ies) not restored`)
+          for (const s of res.skipped.slice(0, 10)) console.log(`[supervisor]   skipped ${s.path}: ${s.reason}`)
+          if (res.skipped.length > 10) console.log(`[supervisor]   … ${res.skipped.length - 10} more`)
+        }
         // Reconcile node_modules from restored package.json (critical for link: deps)
         try {
           execSync('pnpm --dir ~/.dsh/profiles/web install --silent', { timeout: 30000, stdio: 'pipe' })
@@ -161,6 +242,7 @@ Commands:
         } catch (e: any) {
           console.log(`[supervisor] pnpm install failed: ${e?.message ?? String(e)}`)
         }
+        return res
       },
       restartWeb: async () => {
         // One implementation of the single-boot restart: marker (TTL = boot
