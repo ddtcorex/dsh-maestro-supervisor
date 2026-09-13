@@ -1,4 +1,7 @@
 import { execSync } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 /**
  * Serialized systemd restart for `dsh-web.service`: stop, wait until the
@@ -53,4 +56,26 @@ export async function serializedSystemdRestart(deps: SerializedRestartDeps = {})
     await sleep(pollMs)
   }
   exec('systemctl --user start dsh-web.service')
+}
+
+export const DSH_WEB_UNIT_NAME = 'dsh-web.service'
+
+export function dshWebUnitPath(): string {
+  return process.env.DSH_WEB_UNIT_PATH ?? path.join(os.homedir(), '.config/systemd/user/dsh-web.service')
+}
+
+/** Does systemd own `dsh-web.service` on this host? */
+export function systemdUnitExists(unitPath: string = dshWebUnitPath()): boolean {
+  try { return fs.existsSync(unitPath) } catch { return false }
+}
+
+/**
+ * The direct-node `nohup` fallback exists for portable hosts that have no
+ * systemd unit. When the unit exists, systemd owns the boot: spawning node
+ * behind its back is how a second instance appears — the two starts / one
+ * rollback report of 2026-09-13. Gate on "the unit does not exist", never on
+ * "this particular start failed".
+ */
+export function shouldUseNohupFallback(unitExists: boolean): boolean {
+  return !unitExists
 }

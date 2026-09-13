@@ -13,6 +13,37 @@ export function buildKillStalePortsCommand(ports: number[] = [3080]): string {
   return `pids=$(ss -tlnp '( ${filter} )' 2>/dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p' | sort -u); if [ -n "$pids" ]; then echo "[supervisor] killing stale pids $pids"; kill $pids 2>/dev/null || true; sleep 2; fi`
 }
 
+/**
+ * Sentinel appended to dsh-web.log immediately before a supervised restart.
+ *
+ * The log is append-only and carries no timestamps, so this line is the only
+ * durable ordering between "the previous boot's crash" and "this boot's
+ * output". Without it the health scan inherited the previous, failed boot's
+ * `EADDRINUSE` stack and rolled back a healthy, still-booting instance
+ * (incident 2026-09-13).
+ */
+export const BOOT_BOUNDARY_MARKER = '[supervisor] boot-boundary'
+
+/** The production dsh-web log (override with DSH_WEB_LOG for tests/tools). */
+export function dshWebLogPath(): string {
+  return process.env.DSH_WEB_LOG ?? path.join(os.homedir(), '.dsh/dsh-web.log')
+}
+
+/**
+ * Append the boot-boundary sentinel. Pass an explicit `logPath` in tests, or
+ * redirect with DSH_WEB_LOG. With no destination at all under VITEST this is a
+ * deliberate no-op so a unit test can never append to the operator's real log.
+ */
+export function markBootBoundary(logPath?: string): void {
+  const explicit = logPath ?? process.env.DSH_WEB_LOG
+  if (explicit === undefined && process.env.VITEST) return
+  const p = explicit ?? dshWebLogPath()
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.appendFileSync(p, `${BOOT_BOUNDARY_MARKER} ${new Date().toISOString()}\n`)
+  } catch {}
+}
+
 // LKG rollback copies each entry with fs.cpSync — an entry that resolves back
 // into itself (e.g. a symlink cycle reachable from ~/.dsh, observed in
 // production pointing into ~/.npm/_npx/.../node_modules/unist-util-position)
@@ -46,6 +77,9 @@ export function writePlannedRestart(ttlMs = 30000): void {
   fs.mkdirSync(path.dirname(p), { recursive: true })
   fs.writeFileSync(p, JSON.stringify({ ts: Date.now(), ttl: ttlMs }), { mode: 0o600 })
   try { fs.chmodSync(p, 0o600) } catch {}
+  // The boundary belongs to the restart, not to the poller: every sanctioned
+  // restart path already writes this marker first.
+  markBootBoundary()
 }
 
 export function checkPlannedRestart(markerPath?: string): boolean {

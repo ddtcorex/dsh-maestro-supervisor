@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { serializedSystemdRestart } from '../src/host/restart-exec.js'
+import { serializedSystemdRestart, shouldUseNohupFallback, systemdUnitExists } from '../src/host/restart-exec.js'
 
 // A serialized restart must never overlap the old process: stop, wait until
 // the unit is inactive, then start — instead of one raw `systemctl restart`
@@ -61,5 +61,19 @@ describe('serializedSystemdRestart', () => {
       }),
     })
     await expect(serializedSystemdRestart(d)).rejects.toThrow(/start refused/)
+  })
+})
+
+describe('nohup fallback gate', () => {
+  it('never uses the direct-node fallback when the systemd unit exists', () => {
+    expect(shouldUseNohupFallback(true)).toBe(false)
+  })
+
+  it('falls back to direct node only on hosts without the unit', () => {
+    expect(shouldUseNohupFallback(false)).toBe(true)
+  })
+
+  it('reports a missing unit path instead of throwing', () => {
+    expect(systemdUnitExists('/nonexistent/dsh-web.service')).toBe(false)
   })
 })

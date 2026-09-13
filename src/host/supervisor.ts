@@ -1,4 +1,4 @@
-import type { HealthState } from './health-poller.js'
+import { classifyFetchFailure, type HealthState } from './health-poller.js'
 import { runDebugAgent } from './debug-agent.js'
 import { findInterrupted as defaultFindInterrupted, parseDuration } from './resume.js'
 import * as fs from 'node:fs'
@@ -6,12 +6,11 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { resolveHarnessRoot } from './paths.js'
 import { readSupervisorConfig } from './config.js'
-import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart, clearPlannedRestart, PLANNED_RESTART_TTL_MS } from './restart-guards.js'
+import { writePlannedRestart as defaultWritePlannedRestart, checkPlannedRestart as defaultCheckPlannedRestart, clearPlannedRestart } from './restart-guards.js'
 import type { RestartRequest } from './restart-guards.js'
 import { writeRestartOutcome as defaultWriteOutcome, type RestartOutcome } from './intents.js'
 import { execFileSync } from 'node:child_process'
 import { mintDshSessionCookie, type MintCookieOpts } from './dsh-session.js'
-import { buildKillStalePortsCommand } from './restart-guards.js'
 
 export interface SupervisorDeps {
   pollHealth: () => Promise<HealthState>
@@ -30,6 +29,10 @@ export interface SupervisorDeps {
   // next poll, which would otherwise re-trigger endlessly. Default 3 (at the
   // daemon's 3s interval, ~9s of continuous down before acting).
   downThreshold?: number
+  // Boot budget in ms (default 180_000). A boot younger than this that has not
+  // printed its own success marker is unproven: weak failures and degraded
+  // verdicts must not advance the counters (incident 2026-09-13).
+  bootGraceMs?: number
   getTime?: () => number
   // Checks the dsh-safe-web-update marker (see
   // docs/specs/2026-08-28-supervisor-planned-restart-design.md): a down poll
@@ -144,30 +147,22 @@ export class Supervisor {
   }
 
   async restartWeb(): Promise<void> {
-    this.getWritePlannedRestart()(30000)
+    const grace = await this.getEffectiveBootGraceMs()
+    // Marker first, and its TTL is the boot budget — not 30 s. The observed
+    // boot took 1m52s: after +30 s every poll was judged as a crash, which is
+    // exactly how the 2026-09-13 rollback report was produced (D5).
+    this.getWritePlannedRestart()(grace)
     if (this.deps.restartWeb) {
+      // Injected implementation (cli.ts daemon wiring, tests): it owns the
+      // boot lock, so the single-flight guarantee stays in one place.
       await this.deps.restartWeb()
       return
     }
-    // Fallback systemctl path (mirrors cli.ts) — kept for standalone use.
-    // Serialized stop → wait-inactive → start: a raw `systemctl restart`
-    // boots the new process while a slow-stopping old one still holds
-    // :3082 and crash-loops on EADDRINUSE.
-    const { execSync } = await import('node:child_process')
-    try { execSync(buildKillStalePortsCommand(), { timeout: 5000, stdio: 'pipe' }) } catch {}
-    try {
-      const { serializedSystemdRestart } = await import('./restart-exec.js')
-      await serializedSystemdRestart()
-      return
-    } catch {}
-    try {
-      execSync('systemctl --user start dsh-web.service', { timeout: 15000, stdio: 'pipe' } as any)
-      return
-    } catch {}
-    const { resolveDeepseekHarnessDir } = await import('./paths.js')
-    const harnessRoot = resolveDeepseekHarnessDir()
-    const logPath = path.join(os.homedir(), '.dsh/dsh-web.log')
-    execSync(`setsid nohup bash -c 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; cd ${JSON.stringify(harnessRoot)} && exec node --import tsx/esm apps/cli/src/bin.ts web --no-open >> ${JSON.stringify(logPath)} 2>&1' &` as any, { timeout: 5000 })
+    const { performSingleBootRestart } = await import('./restart-web.js')
+    const res = await performSingleBootRestart({ bootGraceMs: grace })
+    if (!res.restarted) {
+      await this.deps.notify(`restart skipped: ${res.reason ?? 'boot lock held'}`).catch(() => {})
+    }
   }
 
   private getRunDebugAgent() {
@@ -293,6 +288,15 @@ export class Supervisor {
     return 20000
   }
 
+  private async getEffectiveBootGraceMs(): Promise<number> {
+    if (this.deps.bootGraceMs !== undefined) return this.deps.bootGraceMs
+    try {
+      const cfg = await readSupervisorConfig()
+      if (typeof (cfg as any).bootGraceMs === 'number' && (cfg as any).bootGraceMs > 0) return (cfg as any).bootGraceMs
+    } catch {}
+    return 180_000
+  }
+
   private async findInterruptedRecent(withinMs?: number): Promise<{ scanned: number; interrupted: string[] }> {
     const ms = withinMs ?? this.getResumeWithinMs()
     // Prefer injected mock for testability
@@ -396,9 +400,8 @@ export class Supervisor {
             // own 30s TTL runs out.
             this.lastRollback = this.deps.getTime ? this.deps.getTime() : Date.now()
             await this.restartWeb()
-            // Supervisor.restartWeb() wrote a 30s marker; extend it past a slow
-            // boot. It is cleared only once the boot proves healthy below.
-            this.getWritePlannedRestart()(PLANNED_RESTART_TTL_MS)
+            // restartWeb() already wrote the marker with the boot budget as its
+            // TTL; the marker is cleared on the first healthy poll instead.
             await this.deps.notify(`restarted dsh-web after self-restart by session ${restartReq.callerSessionId}`)
           } catch (e: any) {
             await this.deps.notify(`self-restart dsh-web failed: ${e?.message ?? String(e)}`).catch(() => {})
@@ -428,6 +431,14 @@ export class Supervisor {
     // DEGRADED: http 200 but log has plugin error → report + notify, rollback after consecutive threshold
     if (health.degraded) {
       this.consecutiveDown = 0
+      // D1: a degraded verdict while the current boot is unproven is a boot
+      // transient, not a plugin error — the incident's report line
+      // "rollback — degraded: This operation was aborted" was produced exactly
+      // here, five polls after a slow boot.
+      if (health.bootPhase === 'booting') {
+        this.consecutiveDegraded = 0
+        return
+      }
       // Check suppression first — don't count degraded during planned restart grace
       let suppressedByMarkerDeg = false
       try { suppressedByMarkerDeg = this.getCheckPlannedRestart()() } catch { suppressedByMarkerDeg = false }
@@ -502,16 +513,28 @@ export class Supervisor {
     if (health.up) {
       this.consecutiveDown = 0
       this.consecutiveDegraded = 0
-      // Post-self-restart boot proved healthy: clear the suppression marker,
-      // run the post-restart session-scan hook and re-arm the single-flight
-      // latch. A failed clear keeps the latch set so the same marker is never
-      // re-handled into a second restart.
+      // D5: a healthy poll is the authoritative "the restart succeeded"
+      // signal — clear the suppression marker here instead of waiting for its
+      // TTL, so a stale marker can never mute a later real crash.
+      let markerClearedThisTick = false
+      try {
+        if (this.getCheckPlannedRestart()()) {
+          this.getClearPlannedRestart()()
+          markerClearedThisTick = true
+        }
+      } catch {}
+      // Post-self-restart boot proved healthy: run the post-restart
+      // session-scan hook and re-arm the single-flight latch. A failed clear
+      // keeps the latch set so the same marker is never re-handled into a
+      // second restart.
       if (this.awaitingHealthyBoot) {
         this.awaitingHealthyBoot = false
         const req = this.pendingRestartRequest
         this.pendingRestartRequest = undefined
-        let cleared = false
-        try { this.getClearPlannedRestart()(); cleared = true } catch {}
+        let cleared = markerClearedThisTick
+        if (!cleared) {
+          try { this.getClearPlannedRestart()(); cleared = true } catch {}
+        }
         if (cleared) this.restartRequestHandled = false
         if (req) {
           try { this.deps.onRestartRequestHandled?.(req) } catch {}
@@ -569,6 +592,13 @@ export class Supervisor {
     // A lone timed-out poll (e.g. a slow plugin-tree boot) must not trigger
     // rollback/restart: that restart produces its own transient errors on
     // the next poll, which would otherwise re-trigger this same path forever.
+    // D1/D2: while the boot is unproven only a refused connection may advance
+    // the down counter — nothing is listening, so the process is gone. A
+    // timeout/abort (or anything unattributable) is a slow boot, not a crash.
+    if (health.bootPhase === 'booting' && classifyFetchFailure(health.error) !== 'refused') {
+      this.consecutiveDown = 0
+      return
+    }
     this.consecutiveDown++
     let downThreshold = await this.getEffectiveDownThreshold()
     // When a planned restart marker is active, double the threshold (3→6 at

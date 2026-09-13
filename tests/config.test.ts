@@ -56,4 +56,17 @@ describe('supervisor config', () => {
     const cfg = await readSupervisorConfig()
     expect(cfg.downThreshold).toBe(5)
   })
+
+  it('reads bootGraceMs from config', async () => {
+    const { readSupervisorConfig } = await import('../src/host/config.js')
+    await mkdir(join(tmpHome, 'maestro'), { recursive: true })
+    await writeFile(
+      join(tmpHome, 'maestro', 'settings.json'),
+      JSON.stringify({ version: 1, domains: { supervisor: { bootGraceMs: 300000 } } }),
+    )
+    const { resetForTests } = await import('@ddtcorex/dsh-maestro-config-lib')
+    resetForTests()
+    const cfg = await readSupervisorConfig()
+    expect(cfg.bootGraceMs).toBe(300000)
+  })
 })

@@ -228,7 +228,7 @@ describe('supervisor', () => {
     await p1; await p2
   })
 
-  it('marker: restartWeb writes marker before systemctl', async () => {
+  it('marker: restartWeb uses the boot budget as the marker TTL', async () => {
     const writes: string[] = []
     const s = new Supervisor({
       pollHealth: async () => ({ up: true, httpCode: 200 }),
@@ -238,12 +238,30 @@ describe('supervisor', () => {
       rollback: vi.fn(async () => {}),
       restartWeb: async () => { writes.push('restart') },
       notify: vi.fn(async () => {}),
-      // injected marker writer for test isolation — Supervisor.restartWeb must call it with 30000 first
-      writePlannedRestart: ((ttl?: number) => { writes.push(`marker:${ttl ?? 30000}`) }) as any,
+      bootGraceMs: 180_000,
+      // injected marker writer for test isolation — TTL follows bootGraceMs (D5)
+      writePlannedRestart: ((ttl?: number) => { writes.push(`marker:${ttl}`) }) as any,
     } as any)
     await s.restartWeb()
-    expect(writes[0]).toBe('marker:30000')
+    expect(writes[0]).toBe('marker:180000')
     expect(writes[1]).toBe('restart')
+  })
+
+  it('clears the suppression marker on the first healthy poll', async () => {
+    const cleared = vi.fn()
+    const s = new Supervisor({
+      pollHealth: async () => ({ up: true, httpCode: 200 }),
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: vi.fn(async () => {}),
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      checkPlannedRestart: () => true,
+      clearPlannedRestart: cleared,
+    } as any)
+    await s.tick()
+    expect(cleared).toHaveBeenCalledTimes(1)
   })
 
   it('marker: tick suppressed when planned restart active (no writeFailed/writeReport/rollback)', async () => {
@@ -335,6 +353,7 @@ describe('caller restart-request handling', () => {
       // Hermetic: never write the real ~/.dsh/.supervisor/planned-restart.json
       // (a live daemon and parallel test files contend on that path).
       writePlannedRestart: () => {},
+      bootGraceMs: 180_000,
       readRestartRequest: () => req,
     } as any)
     await supervisor.tick()
@@ -358,6 +377,7 @@ describe('caller restart-request handling', () => {
       notify: async () => {},
       getTime: () => Date.now(),
       writePlannedRestart: () => {},
+      bootGraceMs: 180_000,
       readRestartRequest: () => undefined,
     } as any)
     await supervisor.tick()
@@ -383,6 +403,7 @@ describe('caller restart-request handling', () => {
       notify: async () => {},
       getTime: () => Date.now(),
       writePlannedRestart: () => {},
+      bootGraceMs: 180_000,
       readRestartRequest: () => marker,
       clearPlannedRestart: cleared,
     } as any)
@@ -422,6 +443,7 @@ describe('caller restart-request handling', () => {
       notify: async () => {},
       getTime: () => Date.now(),
       writePlannedRestart: () => {},
+      bootGraceMs: 180_000,
       readRestartRequest: () => ({ ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-1' }),
       clearPlannedRestart: () => { throw new Error('disk error') },
     } as any)
@@ -455,6 +477,7 @@ describe('caller restart-request handling', () => {
       notify: async () => {},
       getTime: () => Date.now(),
       writePlannedRestart: () => {},
+      bootGraceMs: 180_000,
       readRestartRequest: () => ({ ts: Date.now(), ttl: 180_000, callerSessionId: 'proj/s-1' }),
       downThreshold: 1, // normally a single down tick would rollback + restart
     } as any)
@@ -470,5 +493,69 @@ describe('caller restart-request handling', () => {
     expect(restartWeb).toHaveBeenCalledTimes(1)
     supervisor.stop()
     vi.useRealTimers()
+  })
+})
+
+describe('boot-settled counter gate', () => {
+  function makeSupervisor(over: Record<string, unknown>) {
+    return new Supervisor({
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: 'failed-ts', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: vi.fn(async () => {}),
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      // Hermetic: never read the operator's real planned-restart marker.
+      checkPlannedRestart: () => false,
+      ...over,
+    } as any)
+  }
+
+  it('never advances the degraded counter while the boot is unproven', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: true, httpCode: 200, error: 'This operation was aborted', degraded: true, bootPhase: 'booting' }),
+    })
+    for (let i = 0; i < 8; i++) await s.tick()
+    expect((s as any).consecutiveDegraded).toBe(0)
+    expect((s as any).deps.writeReport).not.toHaveBeenCalled()
+    expect((s as any).deps.rollback).not.toHaveBeenCalled()
+  })
+
+  it('never advances the down counter on a weak failure while the boot is unproven', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: false, error: 'This operation was aborted', bootPhase: 'booting' }),
+      downThreshold: 1,
+    })
+    await s.tick()
+    await s.tick()
+    expect((s as any).consecutiveDown).toBe(0)
+    expect((s as any).deps.rollback).not.toHaveBeenCalled()
+  })
+
+  it('advances the down counter for a refused connection even while the boot is unproven', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: false, error: 'connect ECONNREFUSED 127.0.0.1:3082', bootPhase: 'booting' }),
+      downThreshold: 3,
+    })
+    await s.tick()
+    await s.tick()
+    expect((s as any).consecutiveDown).toBe(2)
+  })
+
+  it('rolls back once the boot has settled and the threshold is reached', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: false, error: 'This operation was aborted', bootPhase: 'settled' }),
+      downThreshold: 3,
+    })
+    await s.tick()
+    await s.tick()
+    expect((s as any).deps.rollback).not.toHaveBeenCalled()
+    await s.tick()
+    expect((s as any).deps.rollback).toHaveBeenCalledTimes(1)
+  })
+
+  it('takes the boot grace from deps when injected', async () => {
+    const s = makeSupervisor({ pollHealth: async () => ({ up: true }), bootGraceMs: 90_000 })
+    await expect((s as any).getEffectiveBootGraceMs()).resolves.toBe(90_000)
   })
 })
