@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.8.3] - 2026-09-14
+
+### Fixed
+
+- **A restarted host now continues the interrupted session** — the
+  post-restart scan looked for the `turn/end interrupted` closer that the
+  harness only writes when something next loads the session, and it re-checked
+  the resume window against the open turn's own start time. A turn that had
+  been running longer than the window was therefore judged too old and skipped
+  (live case: a 21-minute turn, `{"scanned":1288,"interrupted":[]}`), so a
+  restart mid-turn resumed nothing. The window now follows the session log's
+  mtime — an append is the only evidence a session was live recently (#83).
+- **A resume that loses a race with the reconnecting browser is retried** —
+  when a restart interrupts a turn, the browser re-opens that session and holds
+  its write handle while it loads and repairs it, so `agents.resume` fails with
+  `SessionAlreadyOwnedError`. That contention is transient (the same session
+  accepted an agent seconds later), so the resume is retried with a bounded
+  backoff (2s/4s/8s), each attempt recorded as `resume-retry` in the resume
+  audit log; a failure that is not an ownership conflict still fails
+  immediately (#84).
+- **The session the browser already has open can now be continued** — retrying
+  is not enough for the session the operator is actually watching: the open
+  page keeps its write handle for as long as it is open, so `agents.resume`
+  never succeeds on it and the retries only logged three `resume-retry` lines
+  before giving up. Once the retries are exhausted the recovery prompt is
+  delivered through `sessionController.prompt`, the Host API the UI itself
+  uses, which resolves the session's agent; the session is recorded as resumed
+  and parked for the tool-health probe. When that service is absent or refuses
+  the prompt, the original ownership failure is reported as before (#85).
+- **Both delivery paths wait for `bash` before sending the prompt** — a resume
+  admitted before the preset and shell plugins finish mounting attaches the
+  agent with a request header that has no `bash`, so every shell call in that
+  turn fails with `unknown tool "bash"`. The followup path had always waited;
+  the owned-session path added above did not. The wait is now one shared,
+  injectable `waitForCriticalTools()` with the same 5s budget, and that path
+  also runs the post-delivery tool-view probe, so a lost core tool is reported
+  to the operator and to `maestro_resume_tool_health` instead of staying
+  invisible (#86).
+- **`maestro_resume_tool_health` answers on a freshly restarted host** — the
+  tool declared `lastResumeProbe` as a plain object, but a host that has not
+  probed anything yet reports `null`, so the harness tool-output validator
+  rejected the whole call with `"value.lastResumeProbe" must be an object`
+  — on exactly the host state an operator inspects after a restart. The field
+  is declared nullable, and a test pins the schema inside the validator's
+  supported subset (#82).
+
 ## [0.8.2] - 2026-09-13
 
 ### Fixed
