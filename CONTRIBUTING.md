@@ -17,7 +17,7 @@ Thank you for contributing to **dsh-maestro-supervisor** (`@ddtcorex/dsh-maestro
    pnpm build        # tsc host + tsc client + node scripts/build-client.mjs -> lib/ + lib/client.js
    ```
 
-4. Open the project in your editor. Host logic lives in `src/host/`, client auto-reload in `src/client/auto-reload.ts`, tests in `tests/`. `lib/` is committed build output — do not hand-edit. `lib/client.js` is the browser bundle (`window.__ModuleLoader__.load` wrapper).
+4. Open the project in your editor. Host logic lives in `src/host/`, client auto-reload in `src/client/auto-reload.ts`, tests in `tests/`. `lib/` is build output (gitignored) — never hand-edit it; run `pnpm build` after a source change. `lib/client.js` is the browser bundle (`window.__ModuleLoader__.load` wrapper).
 
 ## Superpowers 3-Phase Workflow (AGENTS.md)
 
