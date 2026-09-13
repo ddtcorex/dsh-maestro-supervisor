@@ -250,7 +250,7 @@ function writeZstdV3(dir: string, lines: string[], mtime?: Date) {
   if (mtime) fs.utimesSync(zstdPath, mtime, mtime)
 }
 
-// Regression (2026-09-11 dsh-home outage): live sessions persist as
+// Regression (2026-09-11 outage): live sessions persist as
 // `session.v3.jsonl.zstd`, but the resume scan only looked for
 // `session.jsonl.zstd`/`session.jsonl` — every current session was
 // silently skipped, so no recovery continue was ever triggered.

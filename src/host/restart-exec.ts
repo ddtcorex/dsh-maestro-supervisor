@@ -7,7 +7,7 @@ import * as path from 'node:path'
  * Serialized systemd restart for `dsh-web.service`: stop, wait until the
  * unit is inactive, then start — instead of one raw `systemctl restart`
  * that boots the new process while the old one still holds :3082 and
- * crash-loops on EADDRINUSE (2026-09-11 dsh-home outage: 4 restarts in
+ * crash-loops on EADDRINUSE (2026-09-11 outage: 4 restarts in
  * 15 min over a ~90s SIGTERM stop → 30 EADDRINUSE crashes).
  *
  * All side effects are injectable so tests never touch systemd.
