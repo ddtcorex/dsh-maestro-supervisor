@@ -229,12 +229,20 @@ export function makeResumeToolHealthToolDef(ctx: any): any {
         type: 'object',
         additionalProperties: true,
         properties: {
+          // Null until the first probe of this process (a fresh boot has none),
+          // which the validator accepts only as a oneOf branch — it rejects
+          // `type` arrays and refuses `type` beside `oneOf`.
           lastResumeProbe: {
-            type: 'object',
-            properties: {
-              missing: { type: 'array', items: { type: 'string' } },
-              visible: { type: 'number' },
-            },
+            oneOf: [
+              {
+                type: 'object',
+                properties: {
+                  missing: { type: 'array', items: { type: 'string' } },
+                  visible: { type: 'number' },
+                },
+              },
+              { type: 'null' },
+            ],
           },
           parked: { type: 'array', items: { type: 'string' } },
         },
