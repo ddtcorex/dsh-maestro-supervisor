@@ -4,7 +4,7 @@ import { serializedSystemdRestart, shouldUseNohupFallback, systemdUnitExists } f
 // A serialized restart must never overlap the old process: stop, wait until
 // the unit is inactive, then start — instead of one raw `systemctl restart`
 // that boots the new process while the old one still holds :3082 (EADDRINUSE
-// crash loop, 2026-09-11 dsh-home outage).
+// crash loop, 2026-09-11 outage).
 function harness(over: Record<string, unknown> = {}) {
   const cmds: string[] = []
   const d: any = {
