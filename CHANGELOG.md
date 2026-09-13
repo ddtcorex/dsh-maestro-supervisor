@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.1] - 2026-09-13
+
+### Fixed
+
+- **A slow boot is no longer judged down** — a poll failure while the boot is
+  unproven stays `booting` instead of counting as a crash, which stopped the
+  daemon from rolling `dsh web` back in a loop every ~90s while the port
+  answered in 1.4ms (#73).
+- **The rollback actually restores** — unreadable or mode-`0400` entries are
+  made writable or skipped with a reason instead of aborting the whole restore
+  (#74).
+- Serialize restarts so overlapping boots cannot crash-loop on EADDRINUSE
+  (#71).
+- Resume scan reads v3 session logs, so `continue` triggers again (#72).
+- The restart helper reloads a stale supervisor daemon before swapping
+  `dsh web`, aborting the swap if it cannot (#76).
+
+### Changed
+
+- Stop tracking `lib/` build output (#69); cover v3 session logs in the health
+  classifier (#70); rehearse a rollback end to end on an isolated home (#75).
+
 ## [0.8.0] - 2026-09-08
 
 ### Added
