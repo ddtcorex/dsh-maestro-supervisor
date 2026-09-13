@@ -25,6 +25,7 @@ import {
   buildToolInventoryMessage,
   type ToolsLike,
 } from '../src/host/plugin.js'
+import { probeToolView, summarizeToolView } from '../src/host/tool-view.js'
 
 function makeCtx(overrides: Record<string, any> = {}) {
   const logs: string[] = []
@@ -40,10 +41,14 @@ function makeCtx(overrides: Record<string, any> = {}) {
 }
 
 /**
- * ToolsLike stub that separates the global (host) view from the per-session
- * scoped view: the global view always has every tool (the readiness poll in
- * resumeInterrupted sees bash immediately), while the scoped view reflects the
- * session's actual surface — exactly what the probe must observe.
+ * ToolsLike stub that models the split MEASURED on 2026-09-14: the deployment
+ * global layer holds only host-composition tools and never `bash` — the preset's
+ * standing mount is what contributes bash, read, write and the rest. `scopeTools`
+ * is therefore the preset/agent view; reading without a scope answers nothing.
+ *
+ * The previous stub had it backwards (a global view that always held bash), which
+ * is why the suite could not see a preset-less agent for what it was: the old
+ * pre-delivery gate polled that global view and always "passed".
  */
 function scopedTools(scopeTools: Record<string, unknown>): ToolsLike & { calls: [string, unknown][] } {
   const calls: [string, unknown][] = []
@@ -51,11 +56,10 @@ function scopedTools(scopeTools: Record<string, unknown>): ToolsLike & { calls: 
     calls,
     get: (name: string, scope?: unknown) => {
       calls.push([name, scope])
-      if (scope === undefined) return { name } // global view always has the tool
+      if (scope === undefined) return undefined // no preset layer contributes here
       return scopeTools[name]
     },
-    schemas: (scope?: unknown) =>
-      Object.keys(scope === undefined ? { bash: {}, read: {} } : scopeTools).map((name) => ({ name })),
+    schemas: (scope?: unknown) => (scope === undefined ? [] : Object.keys(scopeTools).map((name) => ({ name }))),
   }
 }
 
@@ -79,11 +83,12 @@ describe('C1 — resumed-session tool-view probe', () => {
     expect(probe.missing).toEqual(['bash'])
     expect(probe.visible).toBe(1)
 
-    // Journal log line pins the flip: bash=false, visible count, missing=bash.
+    // Journal log line pins the observation: the missing name, the count, and
+    // the fact that the registry answered at all.
     const line = ctx._logs.find((l: string) => l.startsWith('info:[supervisor] resumed ')) as string
-    expect(line).toContain('session-resumed-1: bash=false')
-    expect(line).toContain('visibleTools=1')
     expect(line).toContain('missing=bash')
+    expect(line).toContain('visible=1')
+    expect(line).toContain('registry=reachable')
 
     // The probe read the SCOPED view (session id), not just the global registry.
     expect(tools.calls.some(([name, scope]) => name === 'bash' && scope === 'session-resumed-1')).toBe(true)
@@ -99,17 +104,20 @@ describe('C1 — resumed-session tool-view probe', () => {
 
     expect(probeToolView(tools, 'session-resumed-2').missing).toEqual([])
     const line = ctx._logs.find((l: string) => l.startsWith('info:[supervisor] resumed ')) as string
-    expect(line).toContain('session-resumed-2: bash=true')
     expect(line).toContain('missing=none')
+    expect(line).toContain('registry=reachable')
   })
 
-  it('skips the probe (missing []) when ctx.tools is absent', async () => {
+  it('reports an unreadable registry instead of a healthy-looking empty probe', async () => {
     const followup = vi.fn()
-    const ctx = makeCtx({ agents: { get: () => ({ followup }) } }) // no tools service
+    const ctx = makeCtx({ agents: { get: () => ({ followup }) } }) // no tools service at all
 
     const resumed = await resumeInterrupted(ctx, ['proj/session-resumed-3'])
     expect(resumed).toEqual(['proj/session-resumed-3'])
-    expect(ctx._logs.some((l: string) => l.includes('resumed session-resumed-3'))).toBe(false)
+    // No journal line (there is nothing to observe), but the recorded probe must
+    // say the registry was unreachable — never "nothing missing".
+    const recorded = snapshotResumeToolHealth(ctx).lastResumeProbe
+    expect(recorded).toMatchObject({ missing: [], registry: 'unreachable' })
   })
 
   it('uses an injected probeToolView and scope resolver through deps', async () => {
@@ -136,14 +144,15 @@ describe('C1 — resumed-session tool-view probe', () => {
     const handler = createResumeRpcHandler(ctx, { notify: vi.fn(async () => {}), injectSessionMessage: vi.fn() })
     const res = await handler('resume', { ids: ['proj/session-resumed-5'] }, new AbortController().signal)
     expect(res).toEqual({ ok: true, value: { resumed: ['proj/session-resumed-5'] } })
-    expect(ctx._logs.some((l: string) => l.includes('bash=false') && l.includes('missing=bash'))).toBe(true)
+    expect(ctx._logs.some((l: string) => l.includes('missing=bash') && l.includes('registry=reachable'))).toBe(true)
   })
 
-  it('probeToolView returns empty missing when the tools service is absent or lacks get', () => {
-    expect(probeToolView(undefined, 'session-x')).toEqual({ missing: [], visible: 0 })
+  it('probeToolView reports an unreadable registry as unreachable, never as healthy', () => {
+    expect(probeToolView(undefined, 'session-x')).toEqual({ missing: [], visible: 0, registry: 'unreachable' })
     expect(probeToolView({ schemas: () => [] } as unknown as ToolsLike, 'session-x')).toEqual({
       missing: [],
       visible: 0,
+      registry: 'unreachable',
     })
   })
 
@@ -184,7 +193,7 @@ describe('C2 — resumed-session core-tool-loss mitigation', () => {
     // warn policy: no parking, but the real observation is recorded.
     const health = snapshotResumeToolHealth(ctx)
     expect(health.parked).toEqual([])
-    expect(health.lastResumeProbe).toEqual({ missing: ['bash'], visible: 1 })
+    expect(health.lastResumeProbe).toEqual({ missing: ['bash'], visible: 1, registry: 'reachable' })
   })
 
   it('park policy: notifies with manual-reopen marker and records the id in parked', async () => {
@@ -239,7 +248,11 @@ describe('C2 — resumed-session core-tool-loss mitigation', () => {
     const res = await handler('health', {}, new AbortController().signal)
     expect(res).toEqual({
       ok: true,
-      value: { lastResumeProbe: { missing: ['bash'], visible: 1 }, parked: ['session-core-4'] },
+      value: {
+        lastResumeProbe: { missing: ['bash'], visible: 1, registry: 'reachable' },
+        lastComposition: null,
+        parked: ['session-core-4'],
+      },
     })
   })
 
@@ -332,7 +345,7 @@ describe('C3 — resume→probe→warn orchestration contract (public resume pat
     const healthHandler = createResumeToolHealthRpcHandler(ctx)
     const res = await healthHandler('health', {}, new AbortController().signal)
     expect(res.ok).toBe(true)
-    expect(res.value.lastResumeProbe).toEqual({ missing: ['bash'], visible: 1 })
+    expect(res.value.lastResumeProbe).toEqual({ missing: ['bash'], visible: 1, registry: 'reachable' })
     expect(res.value.parked).toEqual([])
   })
 
@@ -352,5 +365,36 @@ describe('C3 — resume→probe→warn orchestration contract (public resume pat
     expect(notify).not.toHaveBeenCalled()
     expect(injectSessionMessage).not.toHaveBeenCalled()
     expect(snapshotResumeToolHealth(ctx).parked).toEqual([])
+  })
+})
+
+describe('probe reports registry reachability', () => {
+  it('marks an unreadable registry unreachable instead of healthy', () => {
+    expect(probeToolView(undefined, 'session-x')).toEqual({ missing: [], visible: 0, registry: 'unreachable' })
+    expect(probeToolView({ schemas: () => [] } as unknown as ToolsLike, 'session-x'))
+      .toEqual({ missing: [], visible: 0, registry: 'unreachable' })
+  })
+
+  it('reports reachable with the scoped count and the missing critical names', () => {
+    const tools: ToolsLike = {
+      get: (name: string, scope?: unknown) => (scope === 'S' && name === 'read' ? { name } : undefined),
+      schemas: (scope?: unknown) => (scope === 'S' ? [{ name: 'read' }] : []),
+    }
+    expect(probeToolView(tools, 'S')).toEqual({ missing: ['bash'], visible: 1, registry: 'reachable' })
+  })
+
+  it('reports unreachable when the registry read throws instead of claiming health', () => {
+    const tools = {
+      get: () => { throw new Error('boom') },
+      schemas: () => { throw new Error('boom') },
+    } as unknown as ToolsLike
+    expect(probeToolView(tools, 'S')).toEqual({ missing: [], visible: 0, registry: 'unreachable' })
+  })
+
+  it('renders both facts for the operator', () => {
+    expect(summarizeToolView({ missing: ['bash'], visible: 1, registry: 'reachable' }))
+      .toBe('missing=bash visible=1 registry=reachable')
+    expect(summarizeToolView({ missing: [], visible: 0, registry: 'unreachable' }))
+      .toBe('missing=none visible=0 registry=unreachable')
   })
 })

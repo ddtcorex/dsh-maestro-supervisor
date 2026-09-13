@@ -22,6 +22,7 @@
  */
 
 import { notify } from './notifier.js'
+import { repairAgentPreset, type RepairOutcome } from './preset.js'
 import {
   probeToolView,
   defaultResolveToolScope,
@@ -36,14 +37,41 @@ import {
 // --- module-level mitigation state ---------------------------------------------
 
 let lastResumeProbe: ToolViewProbe | null = null
+let lastComposition: ResumeComposition | null = null
 const parkedCoreToolLossIds = new Set<string>()
 const resumedSessions = new Set<string>()
 
 /** Reset the per-process mitigation state — tests + fresh boot reuse. */
 export function resetResumeToolHealthState(): void {
   lastResumeProbe = null
+  lastComposition = null
   parkedCoreToolLossIds.clear()
   resumedSessions.clear()
+}
+
+/**
+ * The composition outcome of the most recent resumed session. A host with a
+ * preset-less agent is the one an operator must act on, so this is reported
+ * beside the tool view rather than only journalled.
+ */
+export interface ResumeComposition {
+  sessionId: string
+  /** The preset the agent is joined to after verification, or null when it is joined to none. */
+  composed: string | null
+  /** Whether the resume path had to re-link the agent to its preset. */
+  repaired: boolean
+  /** Repair classification: `already-composed`, `repaired`, `no-preset-recorded`, … */
+  reason: string
+}
+
+/** Record the composition outcome of one resumed session. */
+export function recordResumeComposition(composition: ResumeComposition): void {
+  lastComposition = composition
+}
+
+/** Park a session for manual reopen — the operator must reopen it fresh. */
+export function parkResumedSession(sessionId: string): void {
+  parkedCoreToolLossIds.add(sessionId)
 }
 
 /** Record a session the auto-resume confirmed as resumed (on-demand probe target). */
@@ -80,7 +108,7 @@ export function buildToolInventoryMessage(missing: string[], available: string[]
 }
 
 /** Scoped schemas() = exactly what the session can still call; never the global view. */
-function resolveAvailableToolNames(tools: ToolsLike | undefined, scope: string): string[] {
+function resolveAvailableToolNames(tools: ToolsLike | undefined, scope: unknown): string[] {
   try {
     const schemas = typeof tools?.schemas === 'function' ? tools.schemas : undefined
     if (!schemas) return []
@@ -134,7 +162,7 @@ export interface WarnCoreToolLossDeps {
 export async function warnCoreToolLoss(
   ctx: any,
   sessionId: string,
-  scope: string,
+  scope: unknown,
   probe: ToolViewProbe,
   policy: ResumeCoreToolPolicy,
   opts: WarnCoreToolLossDeps = {},
@@ -157,6 +185,7 @@ export async function warnCoreToolLoss(
 
 export interface ResumeToolHealthSnapshot {
   lastResumeProbe: ToolViewProbe | null
+  lastComposition: ResumeComposition | null
   parked: string[]
 }
 
@@ -165,6 +194,7 @@ function mergeResumeProbes(base: ToolViewProbe | null, next: ToolViewProbe): Too
   return {
     missing: Array.from(new Set([...base.missing, ...next.missing])),
     visible: base.visible + next.visible,
+    registry: base.registry === 'reachable' && next.registry === 'reachable' ? 'reachable' : 'unreachable',
   }
 }
 
@@ -194,7 +224,7 @@ export function snapshotResumeToolHealth(
     } catch {}
   }
   if (reachable && aggregated) lastResumeProbe = aggregated
-  return { lastResumeProbe, parked: [...parkedCoreToolLossIds] }
+  return { lastResumeProbe, lastComposition, parked: [...parkedCoreToolLossIds] }
 }
 
 /**
@@ -251,10 +281,69 @@ export function makeResumeToolHealthToolDef(ctx: any): any {
         const probe = value?.lastResumeProbe
         const missing = Array.isArray(probe?.missing) && probe.missing.length ? probe.missing.join(',') : 'none'
         const visible = typeof probe?.visible === 'number' ? probe.visible : 'n/a'
-        return [{ type: 'text', text: `missing=${missing} visible=${visible} parked=${Array.isArray(value?.parked) ? value.parked.length : 0}` }]
+        const registry = typeof probe?.registry === 'string' ? probe.registry : 'n/a'
+        const composition = value?.lastComposition
+        const composed = composition === null || composition === undefined ? 'unknown' : (composition.composed ?? 'none')
+        const repaired = composition?.repaired === true ? 'yes' : 'no'
+        return [{
+          type: 'text',
+          text: `missing=${missing} visible=${visible} registry=${registry} composed=${composed} repaired=${repaired} parked=${Array.isArray(value?.parked) ? value.parked.length : 0}`,
+        }]
       },
     },
     execute: async () => snapshotResumeToolHealth(ctx),
+  }
+}
+
+/**
+ * dsh.tools definition for the `maestro_repair_session_preset` host tool.
+ *
+ * The resume path repairs automatically; this tool is the operator's manual
+ * handle on the same capability: an agent that already lost its preset (a
+ * session resumed before this fix existed, for example) can be re-linked without
+ * waiting for the next restart.
+ * @param ctx - plugin context providing `agents`, `agentPresets` and the session readers.
+ * @returns the tool definition handed to `ctx.tools.register`.
+ */
+export function makeRepairPresetToolDef(ctx: any): any {
+  return {
+    name: 'maestro_repair_session_preset',
+    description:
+      "Re-link one live session's agent to the agent preset it records. Use when a resumed session lost its " +
+      'tools (every preset tool answers UNKNOWN_TOOL): the agent was published without joining a preset, and ' +
+      'recompose restores the full tool set for its next request. Reports whether the agent was repaired, ' +
+      'already composed, or could not be (no recorded preset, no live agent, recompose failed).',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'The session whose live agent should be re-linked to its preset.' },
+      },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          repaired: { type: 'boolean' },
+          presetId: { type: 'string' },
+          reason: { type: 'string' },
+          composedAfter: { type: 'string' },
+        },
+      },
+      render: (_args: any, value: any) =>
+        [{
+          type: 'text',
+          text: `repaired=${value?.repaired === true ? 'yes' : 'no'} reason=${value?.reason ?? 'unknown'} preset=${value?.presetId ?? 'none'}`,
+        }],
+    },
+    execute: async (args: any): Promise<RepairOutcome & { ok: boolean }> => {
+      const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : ''
+      if (!sessionId) return { ok: false, repaired: false, reason: 'no-preset-recorded' }
+      const outcome = await repairAgentPreset(ctx, sessionId)
+      return { ok: true, ...outcome }
+    },
   }
 }
 
@@ -284,6 +373,13 @@ export function registerResumeToolHealthService(ctx: any): () => void {
     }
   } catch (e: any) {
     try { ctx.logger?.warn?.(`[supervisor] resume-tool-health tool registration failed: ${e?.message ?? String(e)}`) } catch {}
+  }
+  try {
+    if (typeof ctx.tools?.register === 'function') {
+      disposers.push(ctx.tools.register(makeRepairPresetToolDef(ctx)))
+    }
+  } catch (e: any) {
+    try { ctx.logger?.warn?.(`[supervisor] repair-preset tool registration failed: ${e?.message ?? String(e)}`) } catch {}
   }
   return () => { for (const d of disposers) { try { d() } catch {} } }
 }
