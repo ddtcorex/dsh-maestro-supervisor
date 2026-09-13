@@ -25,6 +25,14 @@ import {
   registerResumeToolHealthService,
 } from './resume-tools.js'
 export * from './resume-tools.js'
+import {
+  probeToolView,
+  defaultResolveToolScope,
+  type ToolViewProbe,
+  type ToolViewProbeFn,
+  type ToolScopeResolver,
+} from './tool-view.js'
+export * from './tool-view.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -177,46 +185,6 @@ function getResumeWithinMs(config?: SupervisorPluginConfig): number {
 }
 
 /**
- * Core tools that must be visible on a resumed session. Part C targets the
- * post-restart bash loss (`Error: unknown tool "bash"`); extend this list to
- * widen the probe (e.g. 'cordis_inspect_query').
- */
-export const CRITICAL_TOOLS = ['bash'] as const
-
-/** Minimal ToolRegistry surface the resume tool-view probe reads. */
-export interface ToolsLike {
-  get?(name: string, scope?: unknown): unknown
-  schemas?(scope?: unknown): { name?: string }[]
-}
-
-/** Caller-visible result of the post-resume tool-view probe. */
-export interface ToolViewProbe {
-  missing: string[]
-  visible: number
-}
-
-export type ToolViewProbeFn = (
-  tools: ToolsLike | undefined,
-  scope: string,
-  logger?: { info?: (msg: string) => void },
-) => ToolViewProbe
-
-export type ToolScopeResolver = (ctx: any, sessionId: string) => string
-
-/** Default: the resumed agent's tool scope is its top-level session id. */
-export const defaultResolveToolScope: ToolScopeResolver = (_ctx, sessionId) => sessionId
-
-/**
- * Snapshot one session's visible tool view for the journal: which CRITICAL_TOOLS
- * are missing from the SCOPED registry (not the global view) and how many tools
- * are visible. When the tools service is absent or lacks `get`, the probe is
- * skipped and reports no missing tools. The log line is the Part D trigger —
- * `bash=false` at resume marks the loss the moment it happens.
- * @param tools - the harness ToolRegistry service, or undefined when unavailable.
- * @param scope - the session's tool scope (defaults to the top-level session id).
- * @param logger - optional ctx logger; the probe writes its line when present.
- */
-/**
  * Wait until the tool registry exposes `bash`. The preset and shell plugins
  * mount asynchronously after `apply()`, and a resume delivered before that
  * builds the resumed agent's first request header without bash — every shell
@@ -255,25 +223,6 @@ export async function waitForCriticalTools(
     if (hasBash()) return true
   }
   return hasBash()
-}
-
-export function probeToolView(
-  tools: ToolsLike | undefined,
-  scope: string,
-  logger?: { info?: (msg: string) => void },
-): ToolViewProbe {
-  const probe: ToolViewProbe = { missing: [], visible: 0 }
-  try {
-    const get = tools?.get
-    if (typeof get !== 'function') return probe
-    probe.missing = [...CRITICAL_TOOLS].filter((name) => get(name, scope) === undefined)
-    const schemas = tools?.schemas?.(scope)
-    probe.visible = Array.isArray(schemas) ? schemas.length : 0
-  } catch {}
-  try {
-    logger?.info?.(`[supervisor] resumed ${scope}: bash=${!probe.missing.includes('bash')} visibleTools=${probe.visible} missing=${probe.missing.join(',') || 'none'}`)
-  } catch {}
-  return probe
 }
 
 export async function runAutoResume(

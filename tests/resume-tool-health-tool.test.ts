@@ -56,8 +56,8 @@ describe('maestro_resume_tool_health output schema', () => {
   })
 
   it('still reports a real probe through the object branch', async () => {
-    recordResumeProbe({ missing: ['bash'], visible: 1 })
-    expect((await makeResumeToolHealthToolDef({}).execute({}, {})).lastResumeProbe).toEqual({ missing: ['bash'], visible: 1 })
+    recordResumeProbe({ missing: ['bash'], visible: 1, registry: 'reachable' })
+    expect((await makeResumeToolHealthToolDef({}).execute({}, {})).lastResumeProbe).toEqual({ missing: ['bash'], visible: 1, registry: 'reachable' })
   })
 
   it('stays inside the harness validator subset', () => {

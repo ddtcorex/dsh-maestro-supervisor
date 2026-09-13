@@ -241,7 +241,7 @@ describe('resumeInterrupted', () => {
       resumeOwnershipRetryDelaysMs: [],
       notify,
       injectSessionMessage,
-      probeToolView: () => ({ missing: ['bash'], visible: 11 }),
+      probeToolView: () => ({ missing: ['bash'], visible: 11, registry: 'reachable' }),
       logResume: () => {},
     })
     expect(notify).toHaveBeenCalledTimes(1)

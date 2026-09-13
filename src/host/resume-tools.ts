@@ -80,7 +80,7 @@ export function buildToolInventoryMessage(missing: string[], available: string[]
 }
 
 /** Scoped schemas() = exactly what the session can still call; never the global view. */
-function resolveAvailableToolNames(tools: ToolsLike | undefined, scope: string): string[] {
+function resolveAvailableToolNames(tools: ToolsLike | undefined, scope: unknown): string[] {
   try {
     const schemas = typeof tools?.schemas === 'function' ? tools.schemas : undefined
     if (!schemas) return []
@@ -134,7 +134,7 @@ export interface WarnCoreToolLossDeps {
 export async function warnCoreToolLoss(
   ctx: any,
   sessionId: string,
-  scope: string,
+  scope: unknown,
   probe: ToolViewProbe,
   policy: ResumeCoreToolPolicy,
   opts: WarnCoreToolLossDeps = {},
@@ -165,6 +165,7 @@ function mergeResumeProbes(base: ToolViewProbe | null, next: ToolViewProbe): Too
   return {
     missing: Array.from(new Set([...base.missing, ...next.missing])),
     visible: base.visible + next.visible,
+    registry: base.registry === 'reachable' && next.registry === 'reachable' ? 'reachable' : 'unreachable',
   }
 }
 
