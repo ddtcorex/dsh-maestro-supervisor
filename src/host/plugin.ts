@@ -377,6 +377,54 @@ export async function recoverAgentOptions(input: {
   }
 }
 
+/** Backoff for a resume blocked by a write handle another owner still holds. */
+export const DEFAULT_OWNERSHIP_RETRY_DELAYS_MS = [2000, 4000, 8000]
+
+/** True when the persistence backend refused a second write open. */
+export function isSessionAlreadyOwned(error: any): boolean {
+  return error?.name === 'SessionAlreadyOwnedError' || /already owned by an active write handle/.test(String(error?.message ?? ''))
+}
+
+/**
+ * `agents.resume` while the target session's write handle may still be held by
+ * the just-restarted host: the reconnecting browser re-opens the interrupted
+ * session and keeps that handle while it loads and repairs it, so the boot
+ * scan's resume loses the race with
+ * `session "<id>" is already owned by an active write handle`. That is
+ * transient — on 2026-09-13 the same session accepted an agent seconds later —
+ * so retry a bounded number of times instead of abandoning the session.
+ *
+ * A failure that is not an ownership conflict is rethrown immediately: it
+ * cannot be fixed by waiting.
+ *
+ * @param agents - the agents service (`resume`).
+ * @param options - the resume request handed to `agents.resume`.
+ * @param hooks.delaysMs - backoff before each retry; length = retry count.
+ * @param hooks.onRetry - called before each wait, for the audit trail.
+ * @param hooks.sleep - injectable wait, for tests.
+ * @returns the agent handle from the first successful resume.
+ */
+export async function resumeAgentWithOwnershipRetry(
+  agents: any,
+  options: { resumeSessionId: any; agentOptions: any },
+  hooks: { delaysMs?: number[]; onRetry?: (attempt: number, delayMs: number, error: any) => void; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<any> {
+  const delays = hooks.delaysMs ?? DEFAULT_OWNERSHIP_RETRY_DELAYS_MS
+  const sleep = hooks.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  let attempt = 0
+  for (;;) {
+    try {
+      return await agents?.resume?.(options)
+    } catch (error: any) {
+      const delayMs = isSessionAlreadyOwned(error) ? delays[attempt] : undefined
+      if (delayMs === undefined) throw error
+      attempt++
+      hooks.onRetry?.(attempt, delayMs, error)
+      await sleep(delayMs)
+    }
+  }
+}
+
 export async function resumeInterrupted(
   ctx: any,
   ids: string[],
@@ -392,6 +440,9 @@ export async function resumeInterrupted(
     // Injected in tests so failures/resumptions can be asserted without
     // touching ~/.dsh/.supervisor.
     logResume?: (entry: ResumeLogEntry) => void
+    // Backoff for a resume blocked by another write handle (see
+    // resumeAgentWithOwnershipRetry); injected in tests to keep them instant.
+    resumeOwnershipRetryDelaysMs?: number[]
     config?: SupervisorPluginConfig
   } = {},
 ): Promise<string[]> {
@@ -424,10 +475,17 @@ export async function resumeInterrupted(
           doLog({ ts: Date.now(), sessionId, kind: 'resume-failed', error: 'missing provider/model: persistence has no request/context route — skipping corrupt/routeless session' })
           continue
         }
-        const handle = await agents?.resume?.({
-          resumeSessionId: sid,
-          agentOptions,
-        })
+        const handle = await resumeAgentWithOwnershipRetry(
+          agents,
+          { resumeSessionId: sid, agentOptions },
+          {
+            ...(deps.resumeOwnershipRetryDelaysMs !== undefined ? { delaysMs: deps.resumeOwnershipRetryDelaysMs } : {}),
+            onRetry: (attempt, delayMs, error) => {
+              ctx.logger?.warn?.(`[supervisor] auto-resume: ${id} write handle is still held — retry ${attempt} in ${delayMs}ms`)
+              doLog({ ts: Date.now(), sessionId, kind: 'resume-retry', detail: `attempt=${attempt} delayMs=${delayMs} reason=${error?.message ?? String(error)}` })
+            },
+          },
+        )
         agent = handle?.agent
         if (agent !== undefined) ctx.logger?.info?.(`[supervisor] auto-resume: re-attached agent for ${id}`)
       }
