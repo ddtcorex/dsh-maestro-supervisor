@@ -12,6 +12,8 @@ import {
   readRestartRequest,
   writePlannedRestart,
   writeRestartRequest,
+  markBootBoundary,
+  BOOT_BOUNDARY_MARKER,
 } from '../src/host/restart-guards.js'
 
 // Point os.homedir() at a per-file temp home so every restart marker (the
@@ -208,5 +210,35 @@ describe('restart-dsh-web.sh port topology (local-pin-gate)', () => {
     expect(script).toMatch(/code_3082=.*3082/)
     expect(script).toMatch(/"\$code_3080" == 200 \|\| "\$code_3080" == 401 \|\| "\$code_3080" == 303/)
     expect(script).toMatch(/"\$code_3082" == 200 \|\| "\$code_3082" == 401/)
+  })
+})
+
+describe('boot boundary sentinel', () => {
+  it('appends a parseable boundary line so the poller can scope the log', () => {
+    const logPath = join(fakeHome, 'dsh-web.log')
+    markBootBoundary(logPath)
+    const text = readFileSync(logPath, 'utf8')
+    expect(text).toContain(BOOT_BOUNDARY_MARKER)
+    const iso = text.replace(BOOT_BOUNDARY_MARKER, '').trim()
+    expect(Number.isNaN(Date.parse(iso))).toBe(false)
+  })
+
+  it('never writes to the real dsh-web.log when no path is given', () => {
+    // The default path is the operator's log; under VITEST markBootBoundary
+    // must be a no-op so a unit test can never touch it.
+    expect(() => markBootBoundary()).not.toThrow()
+  })
+
+  it('marks the boundary as part of writing the planned-restart marker', () => {
+    // The boundary belongs to the restart: every sanctioned restart path writes
+    // the planned-restart marker first, so the scan can scope to the new boot.
+    const logPath = join(fakeHome, 'dsh-web.log')
+    process.env.DSH_WEB_LOG = logPath
+    try {
+      writePlannedRestart(30000)
+    } finally {
+      delete process.env.DSH_WEB_LOG
+    }
+    expect(readFileSync(logPath, 'utf8')).toContain(BOOT_BOUNDARY_MARKER)
   })
 })

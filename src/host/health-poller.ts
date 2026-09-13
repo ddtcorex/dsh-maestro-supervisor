@@ -1,4 +1,4 @@
-import { checkPlannedRestart } from './restart-guards.js'
+import { checkPlannedRestart, BOOT_BOUNDARY_MARKER } from './restart-guards.js'
 import { execSync as execSyncImpl } from 'node:child_process'
 
 export interface HealthState {
@@ -133,6 +133,32 @@ export function classifyFetchFailure(err: unknown): 'refused' | 'timeout' | 'oth
   return 'other'
 }
 
+export const SUCCESS_MARKER = 'dsh web: http'
+
+/** Index of the last boot-boundary line in the tail, or -1 when it predates the tail. */
+export function lastBootBoundaryIndex(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes(BOOT_BOUNDARY_MARKER)) return i
+  }
+  return -1
+}
+
+/** Index of the last "dsh web: http" success marker (`lowerLines` must be lower-cased). */
+export function lastSuccessMarkerIndex(lowerLines: string[]): number {
+  for (let i = lowerLines.length - 1; i >= 0; i--) {
+    if (lowerLines[i].includes(SUCCESS_MARKER)) return i
+  }
+  return -1
+}
+
+/** Wall-clock ms parsed from a boot-boundary line, or undefined when unparseable. */
+export function parseBootBoundaryMs(line: string): number | undefined {
+  const m = /boot-boundary\s+(\S+)/.exec(line)
+  if (!m) return undefined
+  const ms = Date.parse(m[1]!)
+  return Number.isNaN(ms) ? undefined : ms
+}
+
 export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState> {
   // 5s was too tight for a busy plugin-tree boot: a lone AbortError from a slow
   // (but otherwise fine) response was indistinguishable from a real crash, and
@@ -193,37 +219,49 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     }
   }
 
+  const now = Date.now()
   const lines = logContent.split('\n')
   const lowerLines = lines.map(l => l.toLowerCase())
-  const currentBootSucceeded = lowerLines.some(l => l.includes('dsh web: http'))
-  const bootPhase = bootFreshness({ activeEnterAtMs, now: Date.now(), bootGraceMs, currentBootSucceeded })
+  // Scope the scan to the current boot. The boundary line is only trusted for
+  // the unit start it was written for: a start more than a boot budget later
+  // (a systemd auto-restart, a manual start) is a different boot.
+  const boundaryIdx = lastBootBoundaryIndex(lines)
+  const boundaryMs = boundaryIdx === -1 ? undefined : parseBootBoundaryMs(lines[boundaryIdx]!)
+  const scopedToThisBoot = boundaryMs !== undefined
+    && activeEnterAtMs !== undefined
+    && activeEnterAtMs >= boundaryMs
+    && activeEnterAtMs - boundaryMs <= bootGraceMs
+  const bootLines = scopedToThisBoot ? lines.slice(boundaryIdx + 1) : lines
+  const bootLower = scopedToThisBoot ? lowerLines.slice(boundaryIdx + 1) : lowerLines
+  const currentBootSucceeded = scopedToThisBoot && bootLower.some(l => l.includes(SUCCESS_MARKER))
+  const bootPhase = bootFreshness({ activeEnterAtMs, now, bootGraceMs, currentBootSucceeded })
   const booting = bootPhase === 'booting'
   const graceActive = suppressed || booting
 
-  // Log scan (Task B3 replaces this block with the boot-boundary-scoped version).
-  let lastSuccessIdx = -1
-  for (let i = lowerLines.length - 1; i >= 0; i--) {
-    if (lowerLines[i].includes('dsh web: http')) { lastSuccessIdx = i; break }
-  }
+  // Inside the current boot, only lines after its own success marker may be a
+  // post-start crash. With no marker and no scope proving these lines are this
+  // boot's, the scan is inconclusive (D3) instead of inheriting the previous
+  // boot's crash text — that inheritance is what produced the 2026-09-13
+  // rollback report ("rollback — degraded: This operation was aborted") from a
+  // healthy, still-booting instance reading the previous boot's EADDRINUSE.
+  const successIdx = lastSuccessMarkerIndex(bootLower)
   let scanLines: string[]
   let scanLower: string[]
-  if (lastSuccessIdx !== -1) {
-    const after = lines.slice(lastSuccessIdx + 1)
-    const afterLower = lowerLines.slice(lastSuccessIdx + 1)
-    if (after.length > 200) {
-      scanLines = after.slice(-200)
-      scanLower = afterLower.slice(-200)
-    } else {
-      scanLines = after
-      scanLower = afterLower
-    }
-  } else if (lines.length > 200) {
-    scanLines = lines.slice(-200)
-    scanLower = lowerLines.slice(-200)
+  if (successIdx !== -1) {
+    scanLines = bootLines.slice(successIdx + 1)
+    scanLower = bootLower.slice(successIdx + 1)
+  } else if (booting && !scopedToThisBoot) {
+    scanLines = []
+    scanLower = []
   } else {
-    scanLines = lines
-    scanLower = lowerLines
+    scanLines = bootLines
+    scanLower = bootLower
   }
+  if (scanLines.length > 200) {
+    scanLines = scanLines.slice(-200)
+    scanLower = scanLower.slice(-200)
+  }
+
   let lastErrorIdx = -1
   let matchedLine = ''
   for (let i = scanLines.length - 1; i >= 0; i--) {
@@ -241,7 +279,7 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
   if (lastErrorIdx !== -1) {
     let hasSuccessAfter = false
     for (let i = lastErrorIdx + 1; i < scanLines.length; i++) {
-      if (scanLower[i].includes('dsh web: http')) { hasSuccessAfter = true; break }
+      if (scanLower[i].includes(SUCCESS_MARKER)) { hasSuccessAfter = true; break }
     }
     if (!hasSuccessAfter) logError = matchedLine
   }

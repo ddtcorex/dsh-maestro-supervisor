@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { pollHealth, bootFreshness, classifyFetchFailure } from '../src/host/health-poller.js'
-import { clearPlannedRestart } from '../src/host/restart-guards.js'
+import { clearPlannedRestart, BOOT_BOUNDARY_MARKER } from '../src/host/restart-guards.js'
 import * as guards from '../src/host/restart-guards.js'
 
 describe('health-poller', () => {
@@ -230,5 +230,77 @@ describe('pollHealth boot grace (2026-09-13 incident)', () => {
       bootGraceMs: 10_000,
     })
     expect(res.bootPhase).toBe('settled')
+  })
+})
+
+describe('log scan scoping (2026-09-13 incident log shape)', () => {
+  const NOW = Date.now()
+  const ACTIVE_ENTER_AT = NOW - 78_000
+  const BOUNDARY_AT = ACTIVE_ENTER_AT - 5_000
+
+  let markerSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(() => { markerSpy = vi.spyOn(guards, 'checkPlannedRestart').mockReturnValue(false) })
+  afterEach(() => { markerSpy.mockRestore() })
+
+  const incidentLog = [
+    'dsh web: http://127.0.0.1:3082/?token=previous-boot',
+    'listening on 3080',
+    'Error: listen EADDRINUSE: address already in use 127.0.0.1:3082',
+    '    at Server.setupListenHandle (node:net:1940:16)',
+    `${BOOT_BOUNDARY_MARKER} ${new Date(BOUNDARY_AT).toISOString()}`,
+    '[workspace] loading plugin tree…',
+  ].join('\n')
+
+  it('never reads the previous boot EADDRINUSE as this boot when the scan is scoped', async () => {
+    const res = await pollHealth({
+      fetch: async () => ({ status: 200, text: async () => 'ok' }) as any,
+      psAlive: async () => true,
+      logTail: async () => incidentLog,
+      activeEnterAtMs: ACTIVE_ENTER_AT,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('booting')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBeFalsy()
+    expect(res.error).toBeUndefined()
+  })
+
+  it('does not credit a stale success marker from a boot we cannot scope', async () => {
+    // No boundary line at all: the previous boot's marker must not prove THIS
+    // boot, otherwise the grace is skipped and the old crash text is judged.
+    const stale = [
+      'dsh web: http://127.0.0.1:3082/?token=previous-boot',
+      'Error: listen EADDRINUSE: address already in use 127.0.0.1:3082',
+    ].join('\n')
+    const res = await pollHealth({
+      fetch: async () => { throw new Error('This operation was aborted') },
+      psAlive: async () => true,
+      logTail: async () => stale,
+      activeEnterAtMs: ACTIVE_ENTER_AT,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('booting')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBeFalsy()
+    expect(res.error).toBeUndefined()
+  })
+
+  it('still reports a real post-start crash of the current boot', async () => {
+    const log = [
+      `${BOOT_BOUNDARY_MARKER} ${new Date(BOUNDARY_AT).toISOString()}`,
+      'dsh web: http://127.0.0.1:3082/?token=this-boot',
+      "ERR_MODULE_NOT_FOUND: Cannot find module '/home/example/.dsh/profiles/web/node_modules/@ddtcorex/dsh-maestro-memory/lib/index.js'",
+    ].join('\n')
+    const res = await pollHealth({
+      fetch: async () => ({ status: 200, text: async () => 'ok' }) as any,
+      psAlive: async () => true,
+      logTail: async () => log,
+      activeEnterAtMs: ACTIVE_ENTER_AT,
+      bootGraceMs: 180_000,
+    })
+    expect(res.bootPhase).toBe('settled')
+    expect(res.up).toBe(true)
+    expect(res.degraded).toBe(true)
+    expect(res.error).toContain('ERR_MODULE_NOT_FOUND')
   })
 })
