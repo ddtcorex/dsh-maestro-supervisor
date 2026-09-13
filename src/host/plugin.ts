@@ -377,6 +377,52 @@ export async function recoverAgentOptions(input: {
   }
 }
 
+/**
+ * Recovery prompt for a turn the crash interrupted. A bare "continue" made the
+ * model answer with text instead of re-issuing its tool call (36646045…,
+ * 31ae53a2…), so the prompt names the synthesized TOOL_OUTCOME_UNKNOWN result
+ * (repair.ts:104) and asks for verification before any retry.
+ */
+export const RECOVERY_PROMPT_IDLE =
+  'The previous turn was interrupted by a crash and the harness has synthesized a tool result with TOOL_OUTCOME_UNKNOWN / TOOL_NOT_STARTED. ' +
+  'Outcome of the last tool call is unknown — it may or may not have had side effects. ' +
+  'Verify external state with bash (e.g., ls, cat, git status) before retrying. ' +
+  'Retry only if the operation is read-only or idempotent; if it may have side effects, verify first or ask the user. ' +
+  'Then continue the original task from where it was interrupted — re-issue the next bash/tool call that the plan requires.'
+
+/**
+ * Admit a recovery prompt into a session this host already has open. The
+ * reconnecting browser holds that session's write handle, so `agents.resume`
+ * cannot take ownership (`SessionAlreadyOwnedError`); `sessionController.prompt`
+ * is the Host API the UI itself uses, and it resolves the session's agent
+ * first. Returns false when the service is absent, the prompt was refused, or
+ * delivery failed — the caller then reports the original ownership failure.
+ *
+ * @param ctx - plugin context providing the optional `sessionController`.
+ * @param sessionId - session to continue.
+ * @param text - recovery prompt text.
+ */
+export async function promptOwnedSession(ctx: any, sessionId: string, text: string): Promise<boolean> {
+  try {
+    const controller = (ctx.get?.('sessionController') as any) ?? (ctx as any).sessionController
+    if (typeof controller?.prompt !== 'function') return false
+    const timeout = typeof AbortSignal !== 'undefined' && typeof (AbortSignal as any).timeout === 'function' ? (AbortSignal as any).timeout(15_000) : undefined
+    const ack = await controller.prompt(
+      {
+        requestId: `supervisor-resume-${sessionId}-${Date.now()}`,
+        sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text }],
+      },
+      timeout,
+    )
+    return ack?.accepted === true
+  } catch {
+    /* a delivery failure is reported as the original ownership failure */
+    return false
+  }
+}
+
 /** Backoff for a resume blocked by a write handle another owner still holds. */
 export const DEFAULT_OWNERSHIP_RETRY_DELAYS_MS = [2000, 4000, 8000]
 
@@ -453,6 +499,25 @@ export async function resumeInterrupted(
   const doLog = deps.logResume ?? ((entry: ResumeLogEntry) => { try { appendResumeLog(entry) } catch {} })
   const coreToolPolicy = getResumeCoreToolPolicy(deps.config)
   const resumed: string[] = []
+  /**
+   * Recovery prompt for one session: a session that requested the dsh web
+   * restart has a durable intent sidecar (written by dsh_web_restart) and is
+   * resumed with a contextual message instead of the generic outcome-unknown
+   * one; the sidecar is consumed so it cannot re-trigger later.
+   */
+  const recoveryPromptFor = (sessionId: string): { text: string; intentReason: string } => {
+    try {
+      const intent = doReadIntent(sessionId)
+      if (intent) {
+        const intentReason = intent.reason ?? ''
+        return {
+          text: `You requested a dsh web restart${intentReason ? ` (reason: ${intentReason})` : ''} and it completed. Do NOT call dsh_web_restart again. Verify current state if needed, then continue the original task.`,
+          intentReason,
+        }
+      }
+    } catch {}
+    return { text: RECOVERY_PROMPT_IDLE, intentReason: '' }
+  }
   for (const id of ids) {
     try {
       const sessionId = id.split('/').pop()!
@@ -475,17 +540,43 @@ export async function resumeInterrupted(
           doLog({ ts: Date.now(), sessionId, kind: 'resume-failed', error: 'missing provider/model: persistence has no request/context route — skipping corrupt/routeless session' })
           continue
         }
-        const handle = await resumeAgentWithOwnershipRetry(
-          agents,
-          { resumeSessionId: sid, agentOptions },
-          {
-            ...(deps.resumeOwnershipRetryDelaysMs !== undefined ? { delaysMs: deps.resumeOwnershipRetryDelaysMs } : {}),
-            onRetry: (attempt, delayMs, error) => {
-              ctx.logger?.warn?.(`[supervisor] auto-resume: ${id} write handle is still held — retry ${attempt} in ${delayMs}ms`)
-              doLog({ ts: Date.now(), sessionId, kind: 'resume-retry', detail: `attempt=${attempt} delayMs=${delayMs} reason=${error?.message ?? String(error)}` })
+        let handle: any
+        try {
+          handle = await resumeAgentWithOwnershipRetry(
+            agents,
+            { resumeSessionId: sid, agentOptions },
+            {
+              ...(deps.resumeOwnershipRetryDelaysMs !== undefined ? { delaysMs: deps.resumeOwnershipRetryDelaysMs } : {}),
+              onRetry: (attempt, delayMs, error) => {
+                ctx.logger?.warn?.(`[supervisor] auto-resume: ${id} write handle is still held — retry ${attempt} in ${delayMs}ms`)
+                doLog({ ts: Date.now(), sessionId, kind: 'resume-retry', detail: `attempt=${attempt} delayMs=${delayMs} reason=${error?.message ?? String(error)}` })
+              },
             },
-          },
-        )
+          )
+        } catch (error: any) {
+          if (!isSessionAlreadyOwned(error)) throw error
+          // The browser already re-opened this session in the restarted host and
+          // holds its write handle, so no amount of waiting lets `agents.resume`
+          // take it. Deliver the recovery prompt through the Host API the UI uses
+          // instead of abandoning the session that was just interrupted.
+          const { text, intentReason } = recoveryPromptFor(sessionId)
+          if (await promptOwnedSession(ctx, sessionId, text)) {
+            if (text !== RECOVERY_PROMPT_IDLE) {
+              try { doConsumeIntent(sessionId) } catch {}
+            }
+            resumed.push(id)
+            try { recordResumedSession(sessionId) } catch {}
+            ctx.logger?.info?.(`[supervisor] auto-resume: delivered the recovery prompt into the open session for ${id}`)
+            doLog({
+              ts: Date.now(),
+              sessionId,
+              kind: 'resumed',
+              detail: text === RECOVERY_PROMPT_IDLE ? 'owned-session-prompt' : `owned-session-prompt:${intentReason.slice(0, 100)}`,
+            })
+            continue
+          }
+          throw error
+        }
         agent = handle?.agent
         if (agent !== undefined) ctx.logger?.info?.(`[supervisor] auto-resume: re-attached agent for ${id}`)
       }
@@ -519,42 +610,19 @@ export async function resumeInterrupted(
       const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
         createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),
       }))
-      // Use an explicit recovery prompt instead of bare "continue" — the synthetic
-      // TOOL_OUTCOME_UNKNOWN / TOOL_NOT_STARTED result (repair.ts:104) tells the
-      // model to verify external state before retrying. A bare "continue" made
-      // the model reply with text instead of re-issuing bash, leaving the
-      // session stuck after every crash (36646045..., 31ae53a2...).
-      const idleMessage =
-        'The previous turn was interrupted by a crash and the harness has synthesized a tool result with TOOL_OUTCOME_UNKNOWN / TOOL_NOT_STARTED. ' +
-        'Outcome of the last tool call is unknown — it may or may not have had side effects. ' +
-        'Verify external state with bash (e.g., ls, cat, git status) before retrying. ' +
-        'Retry only if the operation is read-only or idempotent; if it may have side effects, verify first or ask the user. ' +
-        'Then continue the original task from where it was interrupted — re-issue the next bash/tool call that the plan requires.'
-      // A session that requested the dsh web restart has a durable intent
-      // sidecar (written by dsh_web_restart): resume it with a contextual
-      // message instead of the generic "outcome unknown" recovery prompt, then
-      // consume the sidecar so it cannot re-trigger on a later resume.
-      let resumeMessage = idleMessage
-      let intentReason = ''
-      try {
-        const intent = doReadIntent(sessionId)
-        if (intent) {
-          intentReason = intent.reason ?? ''
-          resumeMessage = `You requested a dsh web restart${intentReason ? ` (reason: ${intentReason})` : ''} and it completed. Do NOT call dsh_web_restart again. Verify current state if needed, then continue the original task.`
-        }
-      } catch {}
+      const { text: resumeMessage, intentReason } = recoveryPromptFor(sessionId)
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: resumeMessage }],
         source: { kind: 'user' },
       }))
-      try { if (resumeMessage !== idleMessage) doConsumeIntent(sessionId) } catch {}
+      try { if (resumeMessage !== RECOVERY_PROMPT_IDLE) doConsumeIntent(sessionId) } catch {}
       resumed.push(id)
       ctx.logger?.info?.(`[supervisor] auto-resume: sent recovery continue for ${id}`)
       doLog({
         ts: Date.now(),
         sessionId,
         kind: 'resumed',
-        detail: resumeMessage === idleMessage ? 'idle-recovery-prompt' : `restart-intent:${intentReason.slice(0, 100)}`,
+        detail: resumeMessage === RECOVERY_PROMPT_IDLE ? 'idle-recovery-prompt' : `restart-intent:${intentReason.slice(0, 100)}`,
       })
       // C1 observability probe — snapshot the resumed session's SCOPED tool
       // view at the success point so a post-resume bash loss surfaces in the

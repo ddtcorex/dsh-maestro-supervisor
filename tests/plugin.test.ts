@@ -121,6 +121,70 @@ describe('resumeInterrupted', () => {
     expect(entries.filter((e) => e.kind === 'resume-retry').length).toBe(2)
   })
 
+  it('delivers the recovery prompt through the session controller when the host already owns the session', async () => {
+    // The reconnecting browser keeps the session open for writing, so
+    // `agents.resume` can never take it; the Host API the UI uses can.
+    const prompt = vi.fn(async () => ({ accepted: true }))
+    const entries: any[] = []
+    const ctx = makeCtx({
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ([{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }]),
+          close: async () => {},
+        }),
+      },
+      agents: {
+        get: () => undefined,
+        resume: vi.fn(async () => {
+          throw Object.assign(new Error('session "session-abc" is already owned by an active write handle'), { name: 'SessionAlreadyOwnedError' })
+        }),
+      },
+      sessionController: { prompt },
+    })
+    await expect(
+      resumeInterrupted(ctx, ['proj/session-abc'], {
+        logResume: (e: any) => entries.push(e),
+        resumeOwnershipRetryDelaysMs: [],
+      }),
+    ).resolves.toEqual(['proj/session-abc'])
+    expect(prompt).toHaveBeenCalledTimes(1)
+    const request = prompt.mock.calls[0][0] as any
+    expect(request.sessionId).toBe('session-abc')
+    expect(request.mode).toBe('queue')
+    expect(request.content[0].type).toBe('text')
+    expect(request.content[0].text).toContain('interrupted')
+    expect(request.content[0].text).toContain('TOOL_OUTCOME_UNKNOWN')
+    expect(entries.some((e) => e.kind === 'resumed' && String(e.detail).includes('owned-session-prompt'))).toBe(true)
+  })
+
+  it('reports the ownership failure when the session controller refuses the prompt', async () => {
+    const prompt = vi.fn(async () => ({ accepted: false }))
+    const entries: any[] = []
+    const ctx = makeCtx({
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ([{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }]),
+          close: async () => {},
+        }),
+      },
+      agents: {
+        get: () => undefined,
+        resume: vi.fn(async () => {
+          throw Object.assign(new Error('session "session-abc" is already owned by an active write handle'), { name: 'SessionAlreadyOwnedError' })
+        }),
+      },
+      sessionController: { prompt },
+    })
+    await expect(
+      resumeInterrupted(ctx, ['proj/session-abc'], {
+        logResume: (e: any) => entries.push(e),
+        resumeOwnershipRetryDelaysMs: [],
+      }),
+    ).resolves.toEqual([])
+    expect(prompt).toHaveBeenCalledTimes(1)
+    expect(entries.filter((e) => e.kind === 'resume-failed').length).toBe(1)
+  })
+
   it('gives up after the bounded retries and reports the ownership failure once', async () => {
     const resumeAgent = vi.fn(async () => {
       throw Object.assign(new Error('session "session-abc" is already owned by an active write handle'), { name: 'SessionAlreadyOwnedError' })
