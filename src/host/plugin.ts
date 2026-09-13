@@ -18,6 +18,7 @@ import { makeSkillProvider } from './skill-provider.js'
 import { registerRestartTool } from './restart-tool.js'
 import { makePreExecuteGuard } from './self-kill-guard.js'
 import { runSessionHealthCheck } from './session-health.js'
+import { notify } from './notifier.js'
 import {
   warnCoreToolLoss,
   recordResumedSession,
@@ -33,6 +34,11 @@ import {
   type ToolScopeResolver,
 } from './tool-view.js'
 export * from './tool-view.js'
+import {
+  resolveSessionPresetId,
+  makePresetSetup,
+} from './preset.js'
+export * from './preset.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -182,47 +188,6 @@ function getResumeWithinMs(config?: SupervisorPluginConfig): number {
     }
   } catch {}
   return 5 * 60 * 1000
-}
-
-/**
- * Wait until the tool registry exposes `bash`. The preset and shell plugins
- * mount asynchronously after `apply()`, and a resume delivered before that
- * builds the resumed agent's first request header without bash — every shell
- * call in that header then fails with `unknown tool "bash"` (36646045…,
- * 31ae53a2…), which is the post-continue tool loss operators see.
- *
- * A registry that cannot be inspected never blocks a resume.
- *
- * @param ctx - plugin context providing the tools service.
- * @param opts.timeoutMs - budget for bash to appear (default 5000).
- * @param opts.pollMs - poll interval (default 500).
- * @param opts.sleep - injectable wait, for tests.
- * @returns whether bash is visible when the budget ends.
- */
-export async function waitForCriticalTools(
-  ctx: any,
-  opts: { timeoutMs?: number; pollMs?: number; sleep?: (ms: number) => Promise<void> } = {},
-): Promise<boolean> {
-  const tools: any = (ctx.get?.('tools') as any) ?? (ctx as any).tools
-  const hasBash = () => {
-    try {
-      if (typeof tools?.get === 'function') return tools.get('bash') !== undefined
-      if (typeof tools?.has === 'function') return tools.has('bash')
-      if (Array.isArray(tools?.list?.())) return tools.list().some((t: any) => t?.name === 'bash' || t === 'bash')
-      return true
-    } catch {
-      return true
-    }
-  }
-  if (hasBash()) return true
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
-  const pollMs = Math.max(1, opts.pollMs ?? 500)
-  const attempts = Math.max(1, Math.ceil((opts.timeoutMs ?? 5000) / pollMs))
-  for (let i = 0; i < attempts; i++) {
-    await sleep(pollMs)
-    if (hasBash()) return true
-  }
-  return hasBash()
 }
 
 export async function runAutoResume(
@@ -461,6 +426,56 @@ export async function resumeAgentWithOwnershipRetry(
   }
 }
 
+/**
+ * A `setup` failure: the agent could not be joined to the preset the session
+ * records. Distinguished from a resume/ownership failure because this one must
+ * never degrade into a preset-less resume.
+ */
+export class PresetComposeError extends Error {
+  /**
+   * @param presetId - the preset that could not be composed.
+   * @param cause - the roster's own failure, kept for the message.
+   */
+  constructor(readonly presetId: string, readonly cause: unknown) {
+    super(`agent preset "${presetId}" could not be composed: ${(cause as any)?.message ?? String(cause)}`)
+    this.name = 'PresetComposeError'
+  }
+}
+
+/**
+ * Activate one session's agent through the single owner of agent activation.
+ *
+ * `sessionController.resolveAgent` is the entry point the Web API domain uses:
+ * it composes the session's preset, de-duplicates concurrent resumes for one
+ * session, and returns the live agent when the browser already re-opened it.
+ * Anything else — the service is absent, it throws, or it answers without an
+ * agent — falls back to `agents.resume` with the preset-composing `setup`,
+ * which still owns the write-handle retry and the owned-session prompt path.
+ *
+ * @param ctx - plugin context providing the optional `sessionController`.
+ * @param sessionId - the session to activate.
+ * @param deps.resolveSessionAgent - injectable controller call, for tests.
+ * @returns the resolved agent when the controller produced one, else `via: 'resume'`.
+ */
+export async function activateSessionAgent(
+  ctx: any,
+  sessionId: string,
+  deps: { resolveSessionAgent?: (ctx: any, sessionId: string) => Promise<{ agent?: any; error?: any } | undefined> } = {},
+): Promise<{ agent?: any; via: 'controller' | 'resume' }> {
+  const resolveViaController = deps.resolveSessionAgent ?? (async (c: any, id: string) => {
+    const controller = c?.get?.('sessionController') ?? c?.sessionController
+    if (typeof controller?.resolveAgent !== 'function') return undefined
+    return controller.resolveAgent(id)
+  })
+  try {
+    const resolved = await resolveViaController(ctx, sessionId)
+    if (resolved?.agent !== undefined) return { agent: resolved.agent, via: 'controller' }
+  } catch {
+    /* fall through: the resume path owns the ownership retry and prompt delivery */
+  }
+  return { via: 'resume' }
+}
+
 export async function resumeInterrupted(
   ctx: any,
   ids: string[],
@@ -479,9 +494,11 @@ export async function resumeInterrupted(
     // Backoff for a resume blocked by another write handle (see
     // resumeAgentWithOwnershipRetry); injected in tests to keep them instant.
     resumeOwnershipRetryDelaysMs?: number[]
-    // Budget for the pre-delivery bash readiness gate (see
-    // waitForCriticalTools); injected in tests to keep them instant.
-    toolWait?: { timeoutMs?: number; pollMs?: number }
+    // Injectable seams for the activation path (defaults use the live
+    // services); tests inject them so no real compose runs.
+    resolveSessionAgent?: (ctx: any, sessionId: string) => Promise<{ agent?: any; error?: any } | undefined>
+    readPresetId?: (sessionId: string) => Promise<string | undefined>
+    makeSetup?: (ctx: any, presetId: string) => ((agentCtx: unknown, agent?: unknown) => Promise<void>) | undefined
     config?: SupervisorPluginConfig
   } = {},
 ): Promise<string[]> {
@@ -538,77 +555,102 @@ export async function resumeInterrupted(
       const agents = (ctx.get?.('agents') as any) ?? (ctx as any).agents
       let agent = agents?.get?.(sessionId)
       if (agent === undefined) {
-        const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
-        const sid = SessionId ? SessionId(sessionId) : sessionId
-        const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
-        const sessionsRoot = deps.config?.sessionLogRoot ?? path.join(os.homedir(), '.dsh', 'sessions')
-        const group = id.slice(0, Math.max(0, id.length - sessionId.length - 1))
-        const agentOptions = await recoverAgentOptions({ persistence, sid, sessionsRoot, group, sessionId, logger: ctx.logger, id })
-        if (agentOptions === undefined) {
-          // Resuming without a provider/model builds an agent whose
-          // {{model}} persona variable has no value, so the very next turn
-          // fails with `prompt variable "{{model}}" has no value for this
-          // assembly (section "deployment:persona")`. Skip corrupt/routeless
-          // sessions instead of triggering a continue that can only fail.
-          ctx.logger?.warn?.(`[supervisor] auto-resume: skipping ${id} — no provider/model recovered (corrupt or routeless session)`)
-          doLog({ ts: Date.now(), sessionId, kind: 'resume-failed', error: 'missing provider/model: persistence has no request/context route — skipping corrupt/routeless session' })
-          continue
-        }
-        let handle: any
-        try {
-          handle = await resumeAgentWithOwnershipRetry(
-            agents,
-            { resumeSessionId: sid, agentOptions },
-            {
-              ...(deps.resumeOwnershipRetryDelaysMs !== undefined ? { delaysMs: deps.resumeOwnershipRetryDelaysMs } : {}),
-              onRetry: (attempt, delayMs, error) => {
-                ctx.logger?.warn?.(`[supervisor] auto-resume: ${id} write handle is still held — retry ${attempt} in ${delayMs}ms`)
-                doLog({ ts: Date.now(), sessionId, kind: 'resume-retry', detail: `attempt=${attempt} delayMs=${delayMs} reason=${error?.message ?? String(error)}` })
-              },
-            },
-          )
-        } catch (error: any) {
-          if (!isSessionAlreadyOwned(error)) throw error
-          // The browser already re-opened this session in the restarted host and
-          // holds its write handle, so no amount of waiting lets `agents.resume`
-          // take it. Deliver the recovery prompt through the Host API the UI uses
-          // instead of abandoning the session that was just interrupted.
-          const { text, intentReason } = recoveryPromptFor(sessionId)
-          // Same readiness gate as the followup path: this session's agent is
-          // attached by the controller when the prompt is admitted, so a prompt
-          // sent before bash is registered freezes a header without it.
-          if (!(await waitForCriticalTools(ctx, deps.toolWait ?? {}))) {
-            ctx.logger?.warn?.(`[supervisor] auto-resume: bash tool not ready for ${id} — delivering the recovery prompt anyway`)
-          }
-          if (await promptOwnedSession(ctx, sessionId, text)) {
-            if (text !== RECOVERY_PROMPT_IDLE) {
-              try { doConsumeIntent(sessionId) } catch {}
-            }
-            resumed.push(id)
-            await observeResumedTools(sessionId)
-            ctx.logger?.info?.(`[supervisor] auto-resume: delivered the recovery prompt into the open session for ${id}`)
-            doLog({
-              ts: Date.now(),
-              sessionId,
-              kind: 'resumed',
-              detail: text === RECOVERY_PROMPT_IDLE ? 'owned-session-prompt' : `owned-session-prompt:${intentReason.slice(0, 100)}`,
-            })
+        // The activation owner runs FIRST and needs no recovered route: it
+        // resolves provider/model itself while composing the session's preset.
+        const activation = await activateSessionAgent(ctx, sessionId, {
+          ...(deps.resolveSessionAgent !== undefined ? { resolveSessionAgent: deps.resolveSessionAgent } : {}),
+        })
+        if (activation.agent !== undefined) {
+          agent = activation.agent
+          ctx.logger?.info?.(`[supervisor] auto-resume: resolved the agent for ${id} through sessionController`)
+        } else {
+          const { SessionId } = await import('@deepseek-ai/dsh-session' as any).catch(() => ({ SessionId: (s: string) => s as any }))
+          const sid = SessionId ? SessionId(sessionId) : sessionId
+          const persistence = (ctx.get?.('sessionPersistence') as any) ?? (ctx as any).sessionPersistence
+          const sessionsRoot = deps.config?.sessionLogRoot ?? path.join(os.homedir(), '.dsh', 'sessions')
+          const group = id.slice(0, Math.max(0, id.length - sessionId.length - 1))
+          const agentOptions = await recoverAgentOptions({ persistence, sid, sessionsRoot, group, sessionId, logger: ctx.logger, id })
+          if (agentOptions === undefined) {
+            // Resuming without a provider/model builds an agent whose
+            // {{model}} persona variable has no value, so the very next turn
+            // fails with `prompt variable "{{model}}" has no value for this
+            // assembly (section "deployment:persona")`. Skip corrupt/routeless
+            // sessions instead of triggering a continue that can only fail.
+            ctx.logger?.warn?.(`[supervisor] auto-resume: skipping ${id} — no provider/model recovered (corrupt or routeless session)`)
+            doLog({ ts: Date.now(), sessionId, kind: 'resume-failed', error: 'missing provider/model: persistence has no request/context route — skipping corrupt/routeless session' })
             continue
           }
-          throw error
+          const presetId = deps.readPresetId !== undefined
+            ? await deps.readPresetId(sessionId)
+            : await resolveSessionPresetId(ctx, sessionId)
+          const rawSetup = deps.makeSetup !== undefined
+            ? deps.makeSetup(ctx, presetId as string)
+            : (presetId === undefined ? undefined : makePresetSetup(ctx, presetId))
+          // Tag a compose failure so the resume catch can tell it apart from an
+          // ownership conflict: the former must abort the session, the latter
+          // retries and falls back to the owned-session prompt.
+          const setup = rawSetup === undefined || presetId === undefined
+            ? rawSetup
+            : async (agentCtx: unknown, agentArg?: unknown) => {
+              try { await rawSetup(agentCtx, agentArg) } catch (error) { throw new PresetComposeError(presetId, error) }
+            }
+          if (presetId === undefined) {
+            ctx.logger?.warn?.(`[supervisor] auto-resume: ${id} records no agent preset — resuming a bare agent`)
+          }
+          let handle: any
+          try {
+            handle = await resumeAgentWithOwnershipRetry(
+              agents,
+              { resumeSessionId: sid, agentOptions, ...(setup === undefined ? {} : { setup }) },
+              {
+                ...(deps.resumeOwnershipRetryDelaysMs !== undefined ? { delaysMs: deps.resumeOwnershipRetryDelaysMs } : {}),
+                onRetry: (attempt, delayMs, error) => {
+                  ctx.logger?.warn?.(`[supervisor] auto-resume: ${id} write handle is still held — retry ${attempt} in ${delayMs}ms`)
+                  doLog({ ts: Date.now(), sessionId, kind: 'resume-retry', detail: `attempt=${attempt} delayMs=${delayMs} reason=${error?.message ?? String(error)}` })
+                },
+              },
+            )
+          } catch (error: any) {
+            if (error instanceof PresetComposeError) {
+              // Continuing would deliver a recovery prompt into an agent whose tool
+              // view is the deployment-global layer — the loss this path exists to
+              // prevent. Abort this session and say why.
+              ctx.logger?.warn?.(`[supervisor] auto-resume: refusing to continue ${id} without its agent preset — ${error.message}`)
+              doLog({ ts: Date.now(), sessionId, kind: 'resume-failed', error: error.message })
+              try { await (deps.notify ?? notify)(`[supervisor] auto-resume: ${sessionId} was NOT continued — ${error.message}`) } catch {}
+              continue
+            }
+            if (!isSessionAlreadyOwned(error)) throw error
+            // The browser already re-opened this session in the restarted host and
+            // holds its write handle, so no amount of waiting lets `agents.resume`
+            // take it. Deliver the recovery prompt through the Host API the UI uses
+            // instead of abandoning the session that was just interrupted.
+            const { text, intentReason } = recoveryPromptFor(sessionId)
+            if (await promptOwnedSession(ctx, sessionId, text)) {
+              if (text !== RECOVERY_PROMPT_IDLE) {
+                try { doConsumeIntent(sessionId) } catch {}
+              }
+              resumed.push(id)
+              await observeResumedTools(sessionId)
+              ctx.logger?.info?.(`[supervisor] auto-resume: delivered the recovery prompt into the open session for ${id}`)
+              doLog({
+                ts: Date.now(),
+                sessionId,
+                kind: 'resumed',
+                detail: text === RECOVERY_PROMPT_IDLE ? 'owned-session-prompt' : `owned-session-prompt:${intentReason.slice(0, 100)}`,
+              })
+              continue
+            }
+            throw error
+          }
+          agent = handle?.agent
+          if (agent !== undefined) ctx.logger?.info?.(`[supervisor] auto-resume: re-attached agent for ${id}`)
         }
-        agent = handle?.agent
-        if (agent !== undefined) ctx.logger?.info?.(`[supervisor] auto-resume: re-attached agent for ${id}`)
       }
       if (typeof agent?.followup !== 'function') {
         ctx.logger?.warn?.(`[supervisor] auto-resume: no live agent available for ${id}`)
         doLog({ ts: Date.now(), sessionId, kind: 'no-agent', detail: 'agents.resume returned no followup-capable handle' })
         continue
-      }
-      // Ensure bash is registered before the followup: the initial resume header
-      // with only 11 tools (missing bash) broke 36646045… — best-effort, 5s.
-      if (!(await waitForCriticalTools(ctx, deps.toolWait ?? {}))) {
-        ctx.logger?.warn?.(`[supervisor] auto-resume: bash tool still not ready for ${id} — continuing anyway`)
       }
       const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
         createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),

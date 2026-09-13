@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, createSessionHealthRpcHandler, inject, waitForCriticalTools } from '../src/host/plugin.js'
+import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, createSessionHealthRpcHandler, inject, snapshotResumeToolHealth } from '../src/host/plugin.js'
 
 function makeCtx(overrides: Record<string, any> = {}) {
   const logs: string[] = []
@@ -14,26 +14,6 @@ function makeCtx(overrides: Record<string, any> = {}) {
     ...overrides,
   }
 }
-
-describe('waitForCriticalTools', () => {
-  it('resolves true as soon as bash appears and false when it never does', async () => {
-    let calls = 0
-    const late = { get: () => (++calls > 2 ? { name: 'bash' } : undefined) }
-    await expect(
-      waitForCriticalTools({ get: (k: string) => (k === 'tools' ? late : undefined) }, { timeoutMs: 10, pollMs: 1, sleep: async () => {} }),
-    ).resolves.toBe(true)
-    expect(calls).toBe(3)
-
-    const never = { get: () => undefined }
-    await expect(
-      waitForCriticalTools({ get: (k: string) => (k === 'tools' ? never : undefined) }, { timeoutMs: 3, pollMs: 1, sleep: async () => {} }),
-    ).resolves.toBe(false)
-  })
-
-  it('never blocks a resume when the registry cannot be inspected', async () => {
-    await expect(waitForCriticalTools({ get: () => undefined })).resolves.toBe(true)
-  })
-})
 
 describe('resumeInterrupted', () => {
   it('sends continue to an already live agent instead of skipping its session', async () => {
@@ -177,23 +157,14 @@ describe('resumeInterrupted', () => {
     expect(entries.some((e) => e.kind === 'resumed' && String(e.detail).includes('owned-session-prompt'))).toBe(true)
   })
 
-  it('waits for bash before delivering the recovery prompt into an owned session', async () => {
-    // The owned-session path attaches the agent when the controller admits the
-    // prompt, so delivering before bash is registered freezes a request header
-    // without it — the post-continue "unknown tool bash" operators hit.
-    let bashCalls = 0
-    let bashCallsAtPrompt = -1
-    const tools = {
-      get: (name: string) => {
-        if (name !== 'bash') return undefined
-        bashCalls++
-        return bashCalls > 2 ? { name: 'bash' } : undefined
-      },
-    }
-    const prompt = vi.fn(async () => {
-      bashCallsAtPrompt = bashCalls
-      return { accepted: true }
-    })
+  it('delivers the recovery prompt into an owned session and reports an unreadable tool view', async () => {
+    // The pre-fix gate polled the GLOBAL registry for bash, which never holds a
+    // preset tool (measured 2026-09-14), so it could only burn its budget and
+    // continue. Activation now composes the preset before publication, and the
+    // probe reports whether it could read the registry at all instead of
+    // claiming the session is healthy.
+    const tools = { get: () => undefined }
+    const prompt = vi.fn(async () => ({ accepted: true }))
     const ctx = makeCtx({
       tools,
       sessionPersistence: {
@@ -212,11 +183,10 @@ describe('resumeInterrupted', () => {
     })
     await resumeInterrupted(ctx, ['proj/session-abc'], {
       resumeOwnershipRetryDelaysMs: [],
-      toolWait: { timeoutMs: 5, pollMs: 1 },
       logResume: () => {},
     })
     expect(prompt).toHaveBeenCalledTimes(1)
-    expect(bashCallsAtPrompt).toBeGreaterThanOrEqual(3)
+    expect(snapshotResumeToolHealth(ctx).lastResumeProbe).toEqual({ missing: [], visible: 0, registry: 'unreachable' })
   })
 
   it('notifies and injects the tool inventory when the owned session lost bash', async () => {
