@@ -13,6 +13,15 @@ export interface SnapshotResult {
   skipped: Array<{ path: string; reason: string }>
 }
 
+export interface SnapshotDeps {
+  /**
+   * Copy one regular file, preserving `mode`. Injectable so a failing entry
+   * (the EACCES a read-only attachment object produces) can be table-tested
+   * without depending on the host's uid or filesystem quirks.
+   */
+  copyFile?: (src: string, dest: string, mode: number) => void
+}
+
 /**
  * DSH-home entries the last-known-good snapshot deliberately never copies.
  *
@@ -73,7 +82,79 @@ function walkFiles(dir: string, base: string = dir): string[] {
   return out
 }
 
-export async function writeLKG(dshHome: string, lkgRoot: string): Promise<SnapshotResult> {
+/** Human-readable, bounded reason for a per-entry copy failure. */
+function failureReason(e: unknown): string {
+  const err = e as any
+  const code = typeof err?.code === 'string' && err.code ? `${err.code}: ` : ''
+  const message = typeof err?.message === 'string' ? err.message : String(e)
+  return `${code}${message}`.slice(0, 300)
+}
+
+interface CopyState {
+  dshHome: string
+  copyFile: (src: string, dest: string, mode: number) => void
+  copied: number
+  skipped: Array<{ path: string; reason: string }>
+}
+
+/**
+ * Copy one snapshot entry, collecting — never throwing — per-entry failures
+ * (D2). `fs.cpSync` aborts the whole snapshot on the first unreadable object,
+ * which is precisely how one 0400 attachment file stopped the rollback that
+ * exists to rescue a broken boot.
+ */
+function copyEntry(state: CopyState, src: string, dest: string, rel: string): void {
+  if (isLkgExcluded(rel)) return
+  let st: fs.Stats
+  try {
+    st = fs.lstatSync(src)
+  } catch (e) {
+    state.skipped.push({ path: rel, reason: failureReason(e) })
+    return
+  }
+  if (st.isDirectory()) {
+    let names: string[]
+    try {
+      // Directory modes are replicated only in their permission-to-traverse
+      // sense: the snapshot itself must stay readable/removable even when the
+      // source directory is not (a 0000 source dir must not produce a snapshot
+      // that nothing — including retention — can delete).
+      fs.mkdirSync(dest, { recursive: true, mode: (st.mode & 0o7777) | 0o700 })
+      names = fs.readdirSync(src)
+    } catch (e) {
+      state.skipped.push({ path: rel, reason: failureReason(e) })
+      return
+    }
+    for (const name of names) {
+      copyEntry(state, path.join(src, name), path.join(dest, name), rel ? `${rel}/${name}` : name)
+    }
+    return
+  }
+  if (st.isSymbolicLink()) {
+    try {
+      const link = fs.readlinkSync(src)
+      fs.mkdirSync(path.dirname(dest), { recursive: true })
+      try { fs.unlinkSync(dest) } catch {}
+      fs.symlinkSync(link, dest)
+      state.copied++
+    } catch (e) {
+      state.skipped.push({ path: rel, reason: failureReason(e) })
+    }
+    return
+  }
+  if (st.isFile()) {
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true })
+      state.copyFile(src, dest, st.mode & 0o7777)
+      state.copied++
+    } catch (e) {
+      state.skipped.push({ path: rel, reason: failureReason(e) })
+    }
+  }
+  // Sockets/FIFOs/devices are not boot configuration: ignored on purpose.
+}
+
+export async function writeLKG(dshHome: string, lkgRoot: string, deps: SnapshotDeps = {}): Promise<SnapshotResult> {
   // Dedupe: skip snapshot if current state identical to latest LKG (prevents 5-min unconditional growth)
   try {
     if (await isDuplicateLKG(dshHome, lkgRoot)) {
@@ -89,37 +170,59 @@ export async function writeLKG(dshHome: string, lkgRoot: string): Promise<Snapsh
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const dest = path.join(lkgRoot, ts)
-  fs.mkdirSync(dest, { recursive: true })
-
-  // Copy only the boot configuration (D1). The per-entry filter applies
-  // `isLkgExcluded()` at every depth, so a nested `*.log` is left behind too.
-  if (fs.existsSync(dshHome)) {
-    for (const entry of fs.readdirSync(dshHome)) {
-      if (isLkgExcluded(entry)) continue
-      const src = path.join(dshHome, entry)
-      const dst = path.join(dest, entry)
-      fs.cpSync(src, dst, {
-        recursive: true,
-        filter: (source: string) => !isLkgExcluded(path.relative(dshHome, source)),
-      })
-    }
+  try {
+    fs.mkdirSync(dest, { recursive: true })
+  } catch (e) {
+    // No snapshot is better than an exception thrown into the rollback path.
+    return { ts, files: 0, skipped: [{ path: lkgRoot, reason: failureReason(e) }] }
   }
 
-  const files = fs.existsSync(dest) ? walkFiles(dest) : []
+  const state: CopyState = {
+    dshHome,
+    copyFile: deps.copyFile ?? ((src, dst, mode) => {
+      fs.copyFileSync(src, dst)
+      try { fs.chmodSync(dst, mode) } catch {}
+    }),
+    copied: 0,
+    skipped: [],
+  }
+
+  // Copy only the boot configuration (D1), one entry at a time so a single
+  // unreadable file is recorded and skipped instead of aborting the snapshot (D2).
+  let topLevel: string[] = []
+  try {
+    if (fs.existsSync(dshHome)) topLevel = fs.readdirSync(dshHome)
+  } catch (e) {
+    state.skipped.push({ path: '.', reason: failureReason(e) })
+  }
+  for (const entry of topLevel) {
+    copyEntry(state, path.join(dshHome, entry), path.join(dest, entry), entry)
+  }
+
+  let fileList: string[] = []
+  try {
+    fileList = fs.existsSync(dest) ? walkFiles(dest) : []
+  } catch (e) {
+    state.skipped.push({ path: 'manifest', reason: failureReason(e) })
+  }
   const manifest: Manifest = {
     ts,
-    files: files
+    files: fileList
       .filter(f => f !== 'manifest.json')
       .map(f => ({ path: f, sha256: sha256File(path.join(dest, f)) })),
   }
-  fs.writeFileSync(path.join(dest, 'manifest.json'), JSON.stringify(manifest, null, 2))
+  try {
+    fs.writeFileSync(path.join(dest, 'manifest.json'), JSON.stringify(manifest, null, 2))
+  } catch (e) {
+    state.skipped.push({ path: 'manifest.json', reason: failureReason(e) })
+  }
 
   // Retention: keep only 3 most recent, plus age (7d) and size (5GB) caps — prevents unbounded 40GB+ growth
   await rotateLKG(lkgRoot, 3).catch(() => {})
   await pruneByAge(lkgRoot, 7 * 24 * 60 * 60 * 1000).catch(() => {})
   await pruneBySize(lkgRoot, 5 * 1024 * 1024 * 1024).catch(() => {})
 
-  return { ts, files: manifest.files.length, skipped: [] }
+  return { ts, files: state.copied, skipped: state.skipped }
 }
 
 export async function pruneByAge(root: string, maxAgeMs: number): Promise<void> {

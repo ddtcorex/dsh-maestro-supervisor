@@ -131,3 +131,68 @@ describe('writeLKG scope (D1)', () => {
     }
   })
 })
+
+// D2 — a snapshot must never abort the path it protects. The 2026-09-13
+// incident aborted the rollback with EACCES from a single read-only attachment
+// object; per-entry failures are collected instead of thrown.
+describe('writeLKG resilience (D2)', () => {
+  function makeHome(root: string): string {
+    const home = path.join(root, 'home')
+    fs.mkdirSync(path.join(home, 'profiles/web'), { recursive: true })
+    fs.writeFileSync(path.join(home, 'profiles/web/package.json'), JSON.stringify({ name: 'web-profile' }))
+    fs.writeFileSync(path.join(home, 'profiles/web/unreadable.json'), '{"locked":true}')
+    fs.mkdirSync(path.join(home, 'maestro'), { recursive: true })
+    fs.writeFileSync(path.join(home, 'maestro/settings.json'), '{"foo":"bar"}')
+    return home
+  }
+
+  it('collects a failing entry into skipped and keeps the snapshot usable', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'snap-skip-'))
+    try {
+      const home = makeHome(root)
+      const lkg = path.join(root, 'lkg')
+      const result = await writeLKG(home, lkg, {
+        copyFile: (src: string, dest: string) => {
+          if (src.endsWith('unreadable.json')) {
+            throw Object.assign(new Error(`EACCES: permission denied, copyfile '${src}'`), { code: 'EACCES' })
+          }
+          fs.copyFileSync(src, dest)
+        },
+      })
+
+      const snapshot = path.join(lkg, result.ts)
+      const skipped = result.skipped.find(s => s.path.endsWith('unreadable.json'))
+      expect(skipped).toBeDefined()
+      expect(skipped!.reason).toContain('EACCES')
+      // Everything else was still copied, and the manifest never claims the file.
+      expect(fs.existsSync(path.join(snapshot, 'profiles/web/package.json'))).toBe(true)
+      expect(fs.existsSync(path.join(snapshot, 'maestro/settings.json'))).toBe(true)
+      expect(fs.existsSync(path.join(snapshot, 'profiles/web/unreadable.json'))).toBe(false)
+      expect(await verifyLKG(snapshot)).toBe(true)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
+
+  it.skipIf(isRoot)('records a real unreadable directory instead of throwing', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'snap-eacces-'))
+    const locked = path.join(root, 'home/profiles/web/locked')
+    try {
+      const home = makeHome(root)
+      fs.mkdirSync(locked, { recursive: true })
+      fs.writeFileSync(path.join(locked, 'secret.json'), '{}')
+      fs.chmodSync(locked, 0o000)
+
+      const result = await writeLKG(home, path.join(root, 'lkg'))
+
+      expect(result.skipped.some(s => s.path === 'profiles/web/locked')).toBe(true)
+      expect(fs.existsSync(path.join(root, 'lkg', result.ts, 'profiles/web/package.json'))).toBe(true)
+      expect(await verifyLKG(path.join(root, 'lkg', result.ts))).toBe(true)
+    } finally {
+      try { fs.chmodSync(locked, 0o755) } catch {}
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
