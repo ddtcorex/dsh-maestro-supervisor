@@ -75,6 +75,26 @@ fail() {
   exit "${2:-1}"
 }
 
+# Single-flight + log scoping (D6, spec 2026-09-13-supervisor-safety-net-design):
+# take the SAME boot.lock and append the SAME boot-boundary sentinel as the
+# supervisor's own performSingleBootRestart, by calling the package's helper —
+# never by re-implementing either marker here. The lock is owned by this shell's
+# PID ($$), so it stays valid for as long as the script runs, and it is released
+# on every exit path via the trap below.
+BOOT_GUARD_HELPER="${PLUGIN_DIR}/lib/bin.js"
+boot_guard_acquire() {
+  if [[ ! -f "$BOOT_GUARD_HELPER" ]]; then
+    fail "boot.lock helper is missing: $BOOT_GUARD_HELPER (run 'pnpm build' in the supervisor package)" 69
+  fi
+  if ! node "$BOOT_GUARD_HELPER" boot-guard acquire --pid "$$" >>"$log" 2>&1; then
+    fail 'another boot holds boot.lock (a dsh web boot or another restart is in flight)' 75
+  fi
+}
+boot_guard_release() {
+  [[ -f "$BOOT_GUARD_HELPER" ]] || return 0
+  node "$BOOT_GUARD_HELPER" boot-guard release --pid "$$" >>"$log" 2>&1 || true
+}
+
 while (($#)); do
   case "$1" in
     --repo)
@@ -222,10 +242,13 @@ printf '[restart] stopping process tree: %s\n' "$(tr '\n' ' ' <<<"$tree_pids")" 
 
 # Mark this as an intentional restart before the port goes down, so
 # dsh-web-supervisor's health poll does not race us with its own rollback.
-# Removed on every exit path (success or failure) via the trap.
+# The boot.lock below is the single-flight half of the same contract; both are
+# released on every exit path (success or failure) via the trap.
+mkdir -p "$(dirname "$log")"
+boot_guard_acquire
 mkdir -p "$(dirname "$marker")"
 date -Iseconds > "$marker"
-trap 'rm -f "$marker"' EXIT
+trap 'boot_guard_release; rm -f "$marker"' EXIT
 
 if [[ "$systemd_managed" == true ]]; then
   # systemctl stop is a clean, intentional stop -- Restart=always does not
