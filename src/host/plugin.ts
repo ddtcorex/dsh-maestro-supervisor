@@ -216,6 +216,47 @@ export const defaultResolveToolScope: ToolScopeResolver = (_ctx, sessionId) => s
  * @param scope - the session's tool scope (defaults to the top-level session id).
  * @param logger - optional ctx logger; the probe writes its line when present.
  */
+/**
+ * Wait until the tool registry exposes `bash`. The preset and shell plugins
+ * mount asynchronously after `apply()`, and a resume delivered before that
+ * builds the resumed agent's first request header without bash — every shell
+ * call in that header then fails with `unknown tool "bash"` (36646045…,
+ * 31ae53a2…), which is the post-continue tool loss operators see.
+ *
+ * A registry that cannot be inspected never blocks a resume.
+ *
+ * @param ctx - plugin context providing the tools service.
+ * @param opts.timeoutMs - budget for bash to appear (default 5000).
+ * @param opts.pollMs - poll interval (default 500).
+ * @param opts.sleep - injectable wait, for tests.
+ * @returns whether bash is visible when the budget ends.
+ */
+export async function waitForCriticalTools(
+  ctx: any,
+  opts: { timeoutMs?: number; pollMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<boolean> {
+  const tools: any = (ctx.get?.('tools') as any) ?? (ctx as any).tools
+  const hasBash = () => {
+    try {
+      if (typeof tools?.get === 'function') return tools.get('bash') !== undefined
+      if (typeof tools?.has === 'function') return tools.has('bash')
+      if (Array.isArray(tools?.list?.())) return tools.list().some((t: any) => t?.name === 'bash' || t === 'bash')
+      return true
+    } catch {
+      return true
+    }
+  }
+  if (hasBash()) return true
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const pollMs = Math.max(1, opts.pollMs ?? 500)
+  const attempts = Math.max(1, Math.ceil((opts.timeoutMs ?? 5000) / pollMs))
+  for (let i = 0; i < attempts; i++) {
+    await sleep(pollMs)
+    if (hasBash()) return true
+  }
+  return hasBash()
+}
+
 export function probeToolView(
   tools: ToolsLike | undefined,
   scope: string,
@@ -489,6 +530,9 @@ export async function resumeInterrupted(
     // Backoff for a resume blocked by another write handle (see
     // resumeAgentWithOwnershipRetry); injected in tests to keep them instant.
     resumeOwnershipRetryDelaysMs?: number[]
+    // Budget for the pre-delivery bash readiness gate (see
+    // waitForCriticalTools); injected in tests to keep them instant.
+    toolWait?: { timeoutMs?: number; pollMs?: number }
     config?: SupervisorPluginConfig
   } = {},
 ): Promise<string[]> {
@@ -505,6 +549,27 @@ export async function resumeInterrupted(
    * resumed with a contextual message instead of the generic outcome-unknown
    * one; the sidecar is consumed so it cannot re-trigger later.
    */
+  /**
+   * C1/C2 after a delivery: probe the resumed session's SCOPED tool view,
+   * journal it, and on a CORE loss notify the operator + inject the tool
+   * inventory message (park policy also parks the id). Shared by the followup
+   * and the owned-session prompt path so neither delivers unobserved.
+   */
+  const observeResumedTools = async (sessionId: string): Promise<void> => {
+    try {
+      const probeTools = (ctx.get?.('tools') as any) ?? (ctx as any).tools
+      const scope = doResolveToolScope(ctx, sessionId)
+      const probe = doProbe(probeTools, scope, ctx.logger)
+      recordResumedSession(sessionId)
+      if (probe.missing.length) {
+        await warnCoreToolLoss(ctx, sessionId, scope, probe, coreToolPolicy, {
+          notify: deps.notify,
+          injectSessionMessage: deps.injectSessionMessage,
+        })
+      }
+      recordResumeProbe(probe)
+    } catch {}
+  }
   const recoveryPromptFor = (sessionId: string): { text: string; intentReason: string } => {
     try {
       const intent = doReadIntent(sessionId)
@@ -560,12 +625,18 @@ export async function resumeInterrupted(
           // take it. Deliver the recovery prompt through the Host API the UI uses
           // instead of abandoning the session that was just interrupted.
           const { text, intentReason } = recoveryPromptFor(sessionId)
+          // Same readiness gate as the followup path: this session's agent is
+          // attached by the controller when the prompt is admitted, so a prompt
+          // sent before bash is registered freezes a header without it.
+          if (!(await waitForCriticalTools(ctx, deps.toolWait ?? {}))) {
+            ctx.logger?.warn?.(`[supervisor] auto-resume: bash tool not ready for ${id} — delivering the recovery prompt anyway`)
+          }
           if (await promptOwnedSession(ctx, sessionId, text)) {
             if (text !== RECOVERY_PROMPT_IDLE) {
               try { doConsumeIntent(sessionId) } catch {}
             }
             resumed.push(id)
-            try { recordResumedSession(sessionId) } catch {}
+            await observeResumedTools(sessionId)
             ctx.logger?.info?.(`[supervisor] auto-resume: delivered the recovery prompt into the open session for ${id}`)
             doLog({
               ts: Date.now(),
@@ -585,28 +656,11 @@ export async function resumeInterrupted(
         doLog({ ts: Date.now(), sessionId, kind: 'no-agent', detail: 'agents.resume returned no followup-capable handle' })
         continue
       }
-      // Ensure bash tool is registered before followup — initial resume header with
-      // only 11 tools (missing bash) broke 36646045... etc. Wait briefly for
-      // ctx.tools to populate (preset mount + shell). Best-effort: poll up to 5s.
-      try {
-        const tools: any = (ctx.get?.('tools') as any) ?? (ctx as any).tools
-        const hasBash = () => {
-          try {
-            if (typeof tools?.get === 'function') return tools.get('bash') !== undefined
-            if (typeof tools?.has === 'function') return tools.has('bash')
-            if (Array.isArray(tools?.list?.())) return tools.list().some((t: any) => t?.name === 'bash' || t === 'bash')
-            // Fallback: check systemPrompt assembly indirectly via tools registry size
-            return true
-          } catch { return true }
-        }
-        if (!hasBash()) {
-          for (let i = 0; i < 10; i++) {
-            await new Promise(r => setTimeout(r, 500))
-            if (hasBash()) break
-          }
-          if (!hasBash()) ctx.logger?.warn?.(`[supervisor] auto-resume: bash tool still not ready for ${id} — continuing anyway`)
-        }
-      } catch {}
+      // Ensure bash is registered before the followup: the initial resume header
+      // with only 11 tools (missing bash) broke 36646045… — best-effort, 5s.
+      if (!(await waitForCriticalTools(ctx, deps.toolWait ?? {}))) {
+        ctx.logger?.warn?.(`[supervisor] auto-resume: bash tool still not ready for ${id} — continuing anyway`)
+      }
       const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
         createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),
       }))
@@ -624,27 +678,7 @@ export async function resumeInterrupted(
         kind: 'resumed',
         detail: resumeMessage === RECOVERY_PROMPT_IDLE ? 'idle-recovery-prompt' : `restart-intent:${intentReason.slice(0, 100)}`,
       })
-      // C1 observability probe — snapshot the resumed session's SCOPED tool
-      // view at the success point so a post-resume bash loss surfaces in the
-      // journal the moment it happens (Part D reads this line). Defensive:
-      // absent ctx.tools just skips the probe, never fails the resume.
-      // C2 mitigation — when the probe reports a CORE tool lost from the
-      // resumed session's SCOPED view, notify the operator + inject the tool-
-      // inventory System message (park policy additionally parks the id for a
-      // manual reopen). Both record the session as "currently resumed" and
-      // the probe as the freshest observation for maestro_resume_tool_health.
-      try {
-        const probeTools = (ctx.get?.('tools') as any) ?? (ctx as any).tools
-        const probe = doProbe(probeTools, doResolveToolScope(ctx, sessionId), ctx.logger)
-        recordResumedSession(sessionId)
-        if (probe.missing.length) {
-          await warnCoreToolLoss(ctx, sessionId, doResolveToolScope(ctx, sessionId), probe, coreToolPolicy, {
-            notify: deps.notify,
-            injectSessionMessage: deps.injectSessionMessage,
-          })
-        }
-        recordResumeProbe(probe)
-      } catch {}
+      await observeResumedTools(sessionId)
     } catch (e: any) {
       ctx.logger?.warn?.(`[supervisor] auto-resume failed ${id}: ${e?.message ?? String(e)}`)
       doLog({ ts: Date.now(), sessionId: String(id).split('/').pop() ?? String(id), kind: 'resume-failed', error: e?.message ?? String(e) })

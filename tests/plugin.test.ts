@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, createSessionHealthRpcHandler, inject } from '../src/host/plugin.js'
+import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, createSessionHealthRpcHandler, inject, waitForCriticalTools } from '../src/host/plugin.js'
 
 function makeCtx(overrides: Record<string, any> = {}) {
   const logs: string[] = []
@@ -14,6 +14,26 @@ function makeCtx(overrides: Record<string, any> = {}) {
     ...overrides,
   }
 }
+
+describe('waitForCriticalTools', () => {
+  it('resolves true as soon as bash appears and false when it never does', async () => {
+    let calls = 0
+    const late = { get: () => (++calls > 2 ? { name: 'bash' } : undefined) }
+    await expect(
+      waitForCriticalTools({ get: (k: string) => (k === 'tools' ? late : undefined) }, { timeoutMs: 10, pollMs: 1, sleep: async () => {} }),
+    ).resolves.toBe(true)
+    expect(calls).toBe(3)
+
+    const never = { get: () => undefined }
+    await expect(
+      waitForCriticalTools({ get: (k: string) => (k === 'tools' ? never : undefined) }, { timeoutMs: 3, pollMs: 1, sleep: async () => {} }),
+    ).resolves.toBe(false)
+  })
+
+  it('never blocks a resume when the registry cannot be inspected', async () => {
+    await expect(waitForCriticalTools({ get: () => undefined })).resolves.toBe(true)
+  })
+})
 
 describe('resumeInterrupted', () => {
   it('sends continue to an already live agent instead of skipping its session', async () => {
@@ -155,6 +175,77 @@ describe('resumeInterrupted', () => {
     expect(request.content[0].text).toContain('interrupted')
     expect(request.content[0].text).toContain('TOOL_OUTCOME_UNKNOWN')
     expect(entries.some((e) => e.kind === 'resumed' && String(e.detail).includes('owned-session-prompt'))).toBe(true)
+  })
+
+  it('waits for bash before delivering the recovery prompt into an owned session', async () => {
+    // The owned-session path attaches the agent when the controller admits the
+    // prompt, so delivering before bash is registered freezes a request header
+    // without it — the post-continue "unknown tool bash" operators hit.
+    let bashCalls = 0
+    let bashCallsAtPrompt = -1
+    const tools = {
+      get: (name: string) => {
+        if (name !== 'bash') return undefined
+        bashCalls++
+        return bashCalls > 2 ? { name: 'bash' } : undefined
+      },
+    }
+    const prompt = vi.fn(async () => {
+      bashCallsAtPrompt = bashCalls
+      return { accepted: true }
+    })
+    const ctx = makeCtx({
+      tools,
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ([{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }]),
+          close: async () => {},
+        }),
+      },
+      agents: {
+        get: () => undefined,
+        resume: vi.fn(async () => {
+          throw Object.assign(new Error('session "session-abc" is already owned by an active write handle'), { name: 'SessionAlreadyOwnedError' })
+        }),
+      },
+      sessionController: { prompt },
+    })
+    await resumeInterrupted(ctx, ['proj/session-abc'], {
+      resumeOwnershipRetryDelaysMs: [],
+      toolWait: { timeoutMs: 5, pollMs: 1 },
+      logResume: () => {},
+    })
+    expect(prompt).toHaveBeenCalledTimes(1)
+    expect(bashCallsAtPrompt).toBeGreaterThanOrEqual(3)
+  })
+
+  it('notifies and injects the tool inventory when the owned session lost bash', async () => {
+    const notify = vi.fn(async () => {})
+    const injectSessionMessage = vi.fn()
+    const ctx = makeCtx({
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ([{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }]),
+          close: async () => {},
+        }),
+      },
+      agents: {
+        get: () => undefined,
+        resume: vi.fn(async () => {
+          throw Object.assign(new Error('session "session-abc" is already owned by an active write handle'), { name: 'SessionAlreadyOwnedError' })
+        }),
+      },
+      sessionController: { prompt: vi.fn(async () => ({ accepted: true })) },
+    })
+    await resumeInterrupted(ctx, ['proj/session-abc'], {
+      resumeOwnershipRetryDelaysMs: [],
+      notify,
+      injectSessionMessage,
+      probeToolView: () => ({ missing: ['bash'], visible: 11 }),
+      logResume: () => {},
+    })
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(injectSessionMessage).toHaveBeenCalledTimes(1)
   })
 
   it('reports the ownership failure when the session controller refuses the prompt', async () => {
