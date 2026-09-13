@@ -21,7 +21,7 @@ test -f packages/dsh-maestro-supervisor/lib/index.js
 test -f packages/dsh-maestro-supervisor/lib/client.js
 ```
 
-`pnpm build` is required after any `src/` change; `lib/` is committed. The client needs both `tsc` steps and the `build-client.mjs` wrapper — plain `tsc` alone leaves `lib/client.js` as a bare ES module and `dsh web` will fail with `exports no "./client" bundle`.
+`pnpm build` is required after any `src/` change; `lib/` is gitignored build output. The client needs both `tsc` steps and the `build-client.mjs` wrapper — plain `tsc` alone leaves `lib/client.js` as a bare ES module and `dsh web` will fail with `exports no "./client" bundle`.
 
 ### 2. Add to DSH Web profile (host + client)
 
