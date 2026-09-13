@@ -79,6 +79,68 @@ const ERROR_PATTERNS = [
   'address already in use',
 ]
 
+export type BootFreshness = 'unknown' | 'booting' | 'settled'
+
+/**
+ * Decide whether the current unit start can already be judged.
+ *
+ * `activeEnterAtMs` is WALL-CLOCK epoch ms from
+ * `systemctl --user show -p ActiveEnterTimestamp dsh-web.service`.
+ * Deliberately NOT `ActiveEnterTimestampMonotonic`: a monotonic reading can
+ * never be compared against an append-only log that carries no timestamps, and
+ * that mismatch is why the previous scan filter silently fell through and let
+ * the previous boot's crash text be read as this boot's (incident 2026-09-13).
+ *
+ * - 'unknown' — no boot anchor (systemd absent, lookup disabled, clock skew):
+ *               behave exactly as before the fix; never suppress anything.
+ * - 'booting' — the unit started less than `bootGraceMs` ago and has not yet
+ *               proven itself with its own success marker: weak failures are
+ *               suppressed and log lines are inconclusive.
+ * - 'settled' — the boot proved itself, or the grace window expired: judge
+ *               normally.
+ */
+export function bootFreshness(opts: {
+  activeEnterAtMs?: number
+  now: number
+  bootGraceMs: number
+  currentBootSucceeded: boolean
+}): BootFreshness {
+  const { activeEnterAtMs, now, bootGraceMs, currentBootSucceeded } = opts
+  if (activeEnterAtMs === undefined || !Number.isFinite(activeEnterAtMs)) return 'unknown'
+  if (now < activeEnterAtMs) return 'unknown'
+  if (currentBootSucceeded) return 'settled'
+  return now - activeEnterAtMs < bootGraceMs ? 'booting' : 'settled'
+}
+
+/**
+ * Classify a fetch failure by what it says about the process.
+ *
+ * 'refused' — nothing is listening, so the process is gone: a strong down
+ *             signal that must never be masked by a boot grace.
+ * 'timeout' — something may be alive but slow: weak, only meaningful once the
+ *             boot grace expired.
+ * 'other'   — anything we cannot attribute.
+ *
+ * Walks the `cause` chain because undici surfaces a refused connection as
+ * `TypeError: fetch failed` with the real `ECONNREFUSED` on `cause`.
+ */
+export function classifyFetchFailure(err: unknown): 'refused' | 'timeout' | 'other' {
+  const parts: string[] = []
+  let cur: any = err
+  for (let depth = 0; cur != null && depth < 5; depth++) {
+    if (typeof cur === 'string') { parts.push(cur); break }
+    const code = typeof cur.code === 'string' ? cur.code : ''
+    const name = typeof cur.name === 'string' ? cur.name : ''
+    const message = typeof cur.message === 'string' ? cur.message : ''
+    parts.push(`${code} ${name} ${message}`)
+    cur = cur.cause
+  }
+  const text = parts.join(' ').toLowerCase()
+  if (/econnrefused|connection refused|ehostunreach|enetunreach/.test(text)) return 'refused'
+  if (/abort|timed? ?out|etimedout|und_err_connect_timeout/.test(text)) return 'timeout'
+  return 'other'
+}
+
 export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState> {
   // 5s was too tight for a busy plugin-tree boot: a lone AbortError from a slow
   // (but otherwise fine) response was indistinguishable from a real crash, and

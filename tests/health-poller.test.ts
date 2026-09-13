@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { pollHealth } from '../src/host/health-poller.js'
+import { pollHealth, bootFreshness, classifyFetchFailure } from '../src/host/health-poller.js'
 import { clearPlannedRestart } from '../src/host/restart-guards.js'
 import * as guards from '../src/host/restart-guards.js'
 
@@ -113,5 +113,56 @@ describe('health-poller', () => {
     })
     expect(res.up).toBe(true)
     expect(res.error).toBeUndefined()
+  })
+})
+
+describe('bootFreshness', () => {
+  const NOW = 1_800_000_000_000
+  const GRACE = 180_000
+
+  it('is unknown without a boot anchor (systemd absent) so nothing is suppressed', () => {
+    expect(bootFreshness({ activeEnterAtMs: undefined, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('unknown')
+  })
+
+  it('is unknown when the anchor is in the future (clock skew)', () => {
+    expect(bootFreshness({ activeEnterAtMs: NOW + 1, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('unknown')
+  })
+
+  it('is booting while the grace is open and this boot has printed no success marker', () => {
+    expect(bootFreshness({ activeEnterAtMs: NOW - 78_000, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('booting')
+  })
+
+  it("is settled as soon as this boot's own success marker was seen", () => {
+    expect(bootFreshness({ activeEnterAtMs: NOW - 5_000, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: true })).toBe('settled')
+  })
+
+  it('is settled once the grace expired without a success marker', () => {
+    expect(bootFreshness({ activeEnterAtMs: NOW - GRACE, now: NOW, bootGraceMs: GRACE, currentBootSucceeded: false })).toBe('settled')
+  })
+})
+
+describe('classifyFetchFailure', () => {
+  it('sees through undici TypeError("fetch failed") to a refused connection', () => {
+    const err = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3082'), { code: 'ECONNREFUSED' }) })
+    expect(classifyFetchFailure(err)).toBe('refused')
+  })
+
+  it('classifies a bare refused message as refused', () => {
+    expect(classifyFetchFailure('connect ECONNREFUSED 127.0.0.1:3082')).toBe('refused')
+  })
+
+  it('classifies the poller abort message as timeout (the incident string)', () => {
+    const err = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })
+    expect(classifyFetchFailure(err)).toBe('timeout')
+  })
+
+  it('classifies an undici connect timeout as timeout', () => {
+    const err = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('Connect Timeout Error'), { code: 'UND_ERR_CONNECT_TIMEOUT' }) })
+    expect(classifyFetchFailure(err)).toBe('timeout')
+  })
+
+  it('falls back to other for anything it cannot attribute', () => {
+    expect(classifyFetchFailure('http 500')).toBe('other')
+    expect(classifyFetchFailure(undefined)).toBe('other')
   })
 })
