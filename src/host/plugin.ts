@@ -23,6 +23,8 @@ import {
   warnCoreToolLoss,
   recordResumedSession,
   recordResumeProbe,
+  recordResumeComposition,
+  parkResumedSession,
   registerResumeToolHealthService,
 } from './resume-tools.js'
 export * from './resume-tools.js'
@@ -37,6 +39,9 @@ export * from './tool-view.js'
 import {
   resolveSessionPresetId,
   makePresetSetup,
+  composedPresetId,
+  repairAgentPreset,
+  type RepairOutcome,
 } from './preset.js'
 export * from './preset.js'
 
@@ -49,6 +54,8 @@ export interface SupervisorPluginConfig {
   autoResumeEnabled?: boolean
   sessionLogRoot?: string // session-log dir for the session-health scan (env SESSIONS_ROOT wins)
   resumeCoreToolPolicy?: ResumeCoreToolPolicy // C2 — see type below
+  /** Re-link a resumed agent that lost its preset (default true; kill switch for the live mutation). */
+  resumeAutoRepair?: boolean
 }
 
 /**
@@ -146,6 +153,47 @@ function getResumeCoreToolPolicy(config?: SupervisorPluginConfig): ResumeCoreToo
     }
   } catch {}
   return 'warn'
+}
+
+/**
+ * Whether the resume path may re-link a preset-less agent to its preset.
+ *
+ * Same precedence chain as `getResumeCoreToolPolicy`: (1) the Cordis-supplied
+ * plugin config, (2) env `DSH_SUPERVISOR_RESUME_AUTO_REPAIR`, (3)
+ * `~/.dsh/.supervisor/config.json`, (4)
+ * `~/.dsh/maestro/settings.json` (`domains.supervisor.resumeAutoRepair`),
+ * (5) `true`. Repair mutates a live agent's tool surface, so operators get a
+ * kill switch; the loss itself is still reported when it is off.
+ * @param config - the Cordis config handed to `apply()`.
+ * @returns whether an automatic repair may run.
+ */
+function getResumeAutoRepair(config?: SupervisorPluginConfig): boolean {
+  if (typeof config?.resumeAutoRepair === 'boolean') return config.resumeAutoRepair
+  const parse = (raw: unknown): boolean | undefined => {
+    if (typeof raw === 'boolean') return raw
+    if (typeof raw === 'string') {
+      const v = raw.trim().toLowerCase()
+      if (['1', 'true', 'yes', 'on'].includes(v)) return true
+      if (['0', 'false', 'no', 'off'].includes(v)) return false
+    }
+    return undefined
+  }
+  const fromEnv = parse(process.env.DSH_SUPERVISOR_RESUME_AUTO_REPAIR)
+  if (fromEnv !== undefined) return fromEnv
+  try {
+    const cfgPath = path.join(os.homedir(), '.dsh/.supervisor/config.json')
+    if (fs.existsSync(cfgPath)) {
+      const fromFile = parse((JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as any).resumeAutoRepair)
+      if (fromFile !== undefined) return fromFile
+    }
+    const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+    if (fs.existsSync(maestroPath)) {
+      const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
+      const fromSettings = parse(j?.domains?.supervisor?.resumeAutoRepair ?? j?.supervisor?.resumeAutoRepair)
+      if (fromSettings !== undefined) return fromSettings
+    }
+  } catch {}
+  return true
 }
 
 function getResumeWithinMs(config?: SupervisorPluginConfig): number {
@@ -499,6 +547,7 @@ export async function resumeInterrupted(
     resolveSessionAgent?: (ctx: any, sessionId: string) => Promise<{ agent?: any; error?: any } | undefined>
     readPresetId?: (sessionId: string) => Promise<string | undefined>
     makeSetup?: (ctx: any, presetId: string) => ((agentCtx: unknown, agent?: unknown) => Promise<void>) | undefined
+    repairPreset?: (ctx: any, sessionId: string, deps: { readPresetId?: (id: string) => Promise<string | undefined> }) => Promise<RepairOutcome>
     config?: SupervisorPluginConfig
   } = {},
 ): Promise<string[]> {
@@ -508,6 +557,9 @@ export async function resumeInterrupted(
   const doResolveToolScope = deps.resolveToolScope ?? defaultResolveToolScope
   const doLog = deps.logResume ?? ((entry: ResumeLogEntry) => { try { appendResumeLog(entry) } catch {} })
   const coreToolPolicy = getResumeCoreToolPolicy(deps.config)
+  const autoRepair = deps.config?.resumeAutoRepair ?? getResumeAutoRepair(deps.config)
+  const doRepairPreset = deps.repairPreset ?? repairAgentPreset
+  const doReadPresetId = deps.readPresetId ?? ((id: string) => resolveSessionPresetId(ctx, id))
   const resumed: string[] = []
   /**
    * Recovery prompt for one session: a session that requested the dsh web
@@ -515,6 +567,50 @@ export async function resumeInterrupted(
    * resumed with a contextual message instead of the generic outcome-unknown
    * one; the sidecar is consumed so it cannot re-trigger later.
    */
+  /**
+   * Verify that the resumed agent is actually joined to a preset, and repair it
+   * when it is not. This is the authoritative check: the roster answers whether
+   * the binding exists (`composedPreset`), which no tool count can.
+   *
+   * Repair runs before the recovery prompt is delivered, so the turn the prompt
+   * starts already carries the preset's tools. A repair that fails is reported
+   * to the operator and parked, but the prompt is still delivered: the session
+   * would otherwise sit silently broken.
+   */
+  const verifyResumedComposition = async (sessionId: string, agent: any): Promise<void> => {
+    try {
+      // Never claim a loss that cannot be verified: without the roster service
+      // (a host that composes no presets) or without the agent's own context,
+      // there is nothing to check and nothing to report.
+      const presets = (ctx.get?.('agentPresets') as any) ?? (ctx as any).agentPresets
+      if (typeof presets?.composedPreset !== 'function') return
+      const live = agent ?? ((ctx.get?.('agents') as any) ?? (ctx as any).agents)?.get?.(sessionId)
+      if (live === undefined || live.ctx === undefined) return
+      let composed = composedPresetId(ctx, live)
+      let repair: RepairOutcome | undefined
+      if (composed === undefined && autoRepair) {
+        repair = await doRepairPreset(ctx, sessionId, { readPresetId: doReadPresetId })
+        composed = repair.composedAfter ?? composedPresetId(ctx, live)
+      }
+      recordResumeComposition({
+        sessionId,
+        composed: composed ?? null,
+        repaired: repair?.repaired === true,
+        reason: repair?.reason ?? (composed !== undefined ? 'already-composed' : 'not-composed'),
+      })
+      if (composed === undefined) {
+        try {
+          await (deps.notify ?? notify)(
+            `[supervisor] resumed ${sessionId}: agent is NOT joined to an agent preset (${repair?.reason ?? 'resumeAutoRepair is off'}) — its tools will be missing; reopen the session`,
+          )
+        } catch {}
+        if (coreToolPolicy === 'park') parkResumedSession(sessionId)
+      } else if (repair?.repaired === true) {
+        try { await (deps.notify ?? notify)(`[supervisor] resumed ${sessionId}: repaired the missing agent preset (${repair.presetId})`) } catch {}
+      }
+    } catch {}
+  }
+
   /**
    * C1/C2 after a delivery: probe the resumed session's SCOPED tool view,
    * journal it, and on a CORE loss notify the operator + inject the tool
@@ -627,6 +723,7 @@ export async function resumeInterrupted(
             // instead of abandoning the session that was just interrupted.
             const { text, intentReason } = recoveryPromptFor(sessionId)
             if (await promptOwnedSession(ctx, sessionId, text)) {
+              await verifyResumedComposition(sessionId, undefined)
               if (text !== RECOVERY_PROMPT_IDLE) {
                 try { doConsumeIntent(sessionId) } catch {}
               }
@@ -652,6 +749,7 @@ export async function resumeInterrupted(
         doLog({ ts: Date.now(), sessionId, kind: 'no-agent', detail: 'agents.resume returned no followup-capable handle' })
         continue
       }
+      await verifyResumedComposition(sessionId, agent)
       const { createUserMessage } = await import('@deepseek-ai/dsh-llm' as any).catch(() => ({
         createUserMessage: (input: any) => ({ ...input, role: 'user', id: crypto.randomUUID() }),
       }))

@@ -242,7 +242,11 @@ describe('C2 — resumed-session core-tool-loss mitigation', () => {
     const res = await handler('health', {}, new AbortController().signal)
     expect(res).toEqual({
       ok: true,
-      value: { lastResumeProbe: { missing: ['bash'], visible: 1, registry: 'reachable' }, parked: ['session-core-4'] },
+      value: {
+        lastResumeProbe: { missing: ['bash'], visible: 1, registry: 'reachable' },
+        lastComposition: null,
+        parked: ['session-core-4'],
+      },
     })
   })
 

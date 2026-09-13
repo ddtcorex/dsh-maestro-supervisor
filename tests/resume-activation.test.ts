@@ -10,7 +10,7 @@
  * the session instead of resuming it blind.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { resumeInterrupted, resetResumeToolHealthState } from '../src/host/plugin.js'
+import { resumeInterrupted, resetResumeToolHealthState, snapshotResumeToolHealth } from '../src/host/plugin.js'
 import type { ResumeLogEntry } from '../src/host/resume-log.js'
 
 /** Persistence handle that answers with a recoverable provider/model route. */
@@ -136,5 +136,93 @@ describe('resume activation composes the preset', () => {
     })).resolves.toEqual(['proj/s1'])
     expect(resume).toHaveBeenCalledTimes(1)
     expect(followup).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('resume verifies composition and repairs a preset-less agent', () => {
+  it('recomposes a preset-less agent before delivering the recovery prompt', async () => {
+    const order: string[] = []
+    let composed: string | undefined
+    const recompose = vi.fn(async (agentCtx: unknown, id: string) => { composed = id; order.push('recompose'); return { id } })
+    const followup = vi.fn(() => { order.push('followup') })
+    const ctx = makeCtx({
+      agents: { get: () => ({ ctx: { agentCtx: true }, followup }) },
+      agentPresets: { composedPreset: () => composed, recompose, mount: vi.fn() },
+      sessionQuery: { observeSession: async () => ({ header: { agentPreset: 'cordis' } }) },
+    })
+
+    await expect(resumeInterrupted(ctx, ['proj/s1'], { logResume: () => {} })).resolves.toEqual(['proj/s1'])
+    expect(recompose).toHaveBeenCalledWith({ agentCtx: true }, 'cordis')
+    expect(order).toEqual(['recompose', 'followup'])
+  })
+
+  it('leaves an already composed agent untouched', async () => {
+    const recompose = vi.fn()
+    const followup = vi.fn()
+    const ctx = makeCtx({
+      agents: { get: () => ({ ctx: {}, followup }) },
+      agentPresets: { composedPreset: () => 'cordis', recompose },
+    })
+
+    await expect(resumeInterrupted(ctx, ['proj/s1'], { logResume: () => {} })).resolves.toEqual(['proj/s1'])
+    expect(recompose).not.toHaveBeenCalled()
+    expect(followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('notifies and parks when the repair fails, and still delivers the prompt', async () => {
+    const notify = vi.fn(async () => {})
+    const followup = vi.fn()
+    const ctx = makeCtx({
+      agents: { get: () => ({ ctx: {}, followup }) },
+      agentPresets: {
+        composedPreset: () => undefined,
+        recompose: async () => { throw new Error('unknown preset') },
+        mount: vi.fn(),
+      },
+      sessionQuery: { observeSession: async () => ({ header: { agentPreset: 'gone' } }) },
+    })
+
+    await expect(resumeInterrupted(ctx, ['proj/s1'], {
+      notify,
+      logResume: () => {},
+      config: { resumeCoreToolPolicy: 'park' },
+    })).resolves.toEqual(['proj/s1'])
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls.some(([line]) => line.includes('NOT joined to an agent preset'))).toBe(true)
+    expect(snapshotResumeToolHealth(ctx).parked).toEqual(['s1'])
+  })
+
+  it('does not repair when resumeAutoRepair is disabled, but still reports the loss', async () => {
+    const notify = vi.fn(async () => {})
+    const recompose = vi.fn()
+    const followup = vi.fn()
+    const ctx = makeCtx({
+      agents: { get: () => ({ ctx: {}, followup }) },
+      agentPresets: { composedPreset: () => undefined, recompose },
+    })
+
+    await expect(resumeInterrupted(ctx, ['proj/s1'], {
+      notify,
+      logResume: () => {},
+      config: { resumeAutoRepair: false },
+    })).resolves.toEqual(['proj/s1'])
+    expect(recompose).not.toHaveBeenCalled()
+    expect(notify.mock.calls.some(([line]) => line.includes('NOT joined to an agent preset'))).toBe(true)
+  })
+
+  it('notifies when a repair succeeded so the operator knows the session was recovered', async () => {
+    const notify = vi.fn(async () => {})
+    let composed: string | undefined
+    const ctx = makeCtx({
+      agents: { get: () => ({ ctx: {}, followup: vi.fn() }) },
+      agentPresets: {
+        composedPreset: () => composed,
+        recompose: async () => { composed = 'cordis'; return {} },
+      },
+      sessionQuery: { observeSession: async () => ({ header: { agentPreset: 'cordis' } }) },
+    })
+
+    await resumeInterrupted(ctx, ['proj/s1'], { notify, logResume: () => {} })
+    expect(notify.mock.calls.some(([line]) => line.includes('repaired'))).toBe(true)
   })
 })

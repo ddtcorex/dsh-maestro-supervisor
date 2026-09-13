@@ -36,14 +36,41 @@ import {
 // --- module-level mitigation state ---------------------------------------------
 
 let lastResumeProbe: ToolViewProbe | null = null
+let lastComposition: ResumeComposition | null = null
 const parkedCoreToolLossIds = new Set<string>()
 const resumedSessions = new Set<string>()
 
 /** Reset the per-process mitigation state — tests + fresh boot reuse. */
 export function resetResumeToolHealthState(): void {
   lastResumeProbe = null
+  lastComposition = null
   parkedCoreToolLossIds.clear()
   resumedSessions.clear()
+}
+
+/**
+ * The composition outcome of the most recent resumed session. A host with a
+ * preset-less agent is the one an operator must act on, so this is reported
+ * beside the tool view rather than only journalled.
+ */
+export interface ResumeComposition {
+  sessionId: string
+  /** The preset the agent is joined to after verification, or null when it is joined to none. */
+  composed: string | null
+  /** Whether the resume path had to re-link the agent to its preset. */
+  repaired: boolean
+  /** Repair classification: `already-composed`, `repaired`, `no-preset-recorded`, … */
+  reason: string
+}
+
+/** Record the composition outcome of one resumed session. */
+export function recordResumeComposition(composition: ResumeComposition): void {
+  lastComposition = composition
+}
+
+/** Park a session for manual reopen — the operator must reopen it fresh. */
+export function parkResumedSession(sessionId: string): void {
+  parkedCoreToolLossIds.add(sessionId)
 }
 
 /** Record a session the auto-resume confirmed as resumed (on-demand probe target). */
@@ -157,6 +184,7 @@ export async function warnCoreToolLoss(
 
 export interface ResumeToolHealthSnapshot {
   lastResumeProbe: ToolViewProbe | null
+  lastComposition: ResumeComposition | null
   parked: string[]
 }
 
@@ -195,7 +223,7 @@ export function snapshotResumeToolHealth(
     } catch {}
   }
   if (reachable && aggregated) lastResumeProbe = aggregated
-  return { lastResumeProbe, parked: [...parkedCoreToolLossIds] }
+  return { lastResumeProbe, lastComposition, parked: [...parkedCoreToolLossIds] }
 }
 
 /**
@@ -252,7 +280,14 @@ export function makeResumeToolHealthToolDef(ctx: any): any {
         const probe = value?.lastResumeProbe
         const missing = Array.isArray(probe?.missing) && probe.missing.length ? probe.missing.join(',') : 'none'
         const visible = typeof probe?.visible === 'number' ? probe.visible : 'n/a'
-        return [{ type: 'text', text: `missing=${missing} visible=${visible} parked=${Array.isArray(value?.parked) ? value.parked.length : 0}` }]
+        const registry = typeof probe?.registry === 'string' ? probe.registry : 'n/a'
+        const composition = value?.lastComposition
+        const composed = composition === null || composition === undefined ? 'unknown' : (composition.composed ?? 'none')
+        const repaired = composition?.repaired === true ? 'yes' : 'no'
+        return [{
+          type: 'text',
+          text: `missing=${missing} visible=${visible} registry=${registry} composed=${composed} repaired=${repaired} parked=${Array.isArray(value?.parked) ? value.parked.length : 0}`,
+        }]
       },
     },
     execute: async () => snapshotResumeToolHealth(ctx),
