@@ -64,7 +64,7 @@ Part of the Maestro Harness suite. See spec for Phase 2 (loader isolation) and P
 - `cordis.patch.yml` — host row `maestro-supervisor` (`autoResumeWithin: 5`, `autoResumeEnabled: true`)
 - `systemd/dsh-web-supervisor.service.template` — systemd user unit (`Restart=always`, `Environment=TELEGRAM_*` commented)
 - `scripts/install-systemd.sh` — installs unit to `~/.config/systemd/user/`
-- `tests/*.test.ts` — vitest suites (13 files, 82 tests + 1 integration skipped unless `DSH_INTEGRATION=1`)
+- `tests/*.test.ts` — vitest suites (one integration suite stays skipped unless `DSH_INTEGRATION=1`)
 
 ## Configuration
 
@@ -100,7 +100,7 @@ Example `~/.dsh/.supervisor/config.json`:
 pnpm --dir packages/dsh-maestro-supervisor install
 pnpm --dir packages/dsh-maestro-supervisor build   # tsc host + tsc client + node scripts/build-client.mjs → lib/ + lib/client.js
 pnpm --dir packages/dsh-maestro-supervisor verify  # tsc --noEmit host + client
-pnpm --dir packages/dsh-maestro-supervisor test    # vitest 82 tests
+pnpm --dir packages/dsh-maestro-supervisor test    # vitest run
 test -f packages/dsh-maestro-supervisor/lib/index.js
 test -f packages/dsh-maestro-supervisor/lib/client.js
 ```
@@ -184,7 +184,7 @@ Run from the repository root (or `packages/dsh-maestro-supervisor`):
 
 ```sh
 pnpm verify   # tsc --noEmit host + client
-pnpm test     # vitest run 82 tests
+pnpm test     # vitest run
 pnpm build    # tsc host + tsc client + node scripts/build-client.mjs → lib/ + lib/client.js
 ```
 
@@ -246,7 +246,7 @@ Host `tsc` outputs `lib/*.js` (flat, `rootDir src/host`). Client `tsc` outputs `
 
 ## Validation
 
-- `pnpm verify` + `pnpm test` green before any success claim (82 tests, 1 skipped). `test -f lib/index.js && test -f lib/client.js` after build.
+- `pnpm verify` + `pnpm test` green before any success claim (a suite needing `DSH_INTEGRATION=1` stays skipped by default). `test -f lib/index.js && test -f lib/client.js` after build.
 - For daemon changes, manual ephemeral check: `DSH_HOME=$(mktemp -d) pnpm --dir deepseek-harness dsh web --port 0` + corrupt `settings.json` → assert report + rollback within 10s.
 - For plugin changes, live check: `curl -s http://127.0.0.1:3080/dsh-maestro-supervisor-resume/scan -X POST ...` → `scanned`/`interrupted`, and `findDanglingOpenTurns` full scan finds subagent `b6487e33` within 5m. For client, `curl -s http://127.0.0.1:3080/plugins/@ddtcorex/dsh-maestro-supervisor/client.js | grep -c "window.location.reload"` → 2, and after `kill` + restart, `fetch HEAD /` polling reloads the page without `F5`.
 - `pnpm --dir deepseek-harness dsh web --port 0` dry-boot must pass before adding to a live profile (see Conventions).

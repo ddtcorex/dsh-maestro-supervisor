@@ -16,7 +16,7 @@ Runs **outside** the `pnpm → sh → node` tree (systemd daemon) to survive tre
 pnpm --dir packages/dsh-maestro-supervisor install
 pnpm --dir packages/dsh-maestro-supervisor build   # tsc host + tsc client + node scripts/build-client.mjs → lib/ + lib/client.js
 pnpm --dir packages/dsh-maestro-supervisor verify  # tsc --noEmit host + client
-pnpm --dir packages/dsh-maestro-supervisor test    # 82 tests
+pnpm --dir packages/dsh-maestro-supervisor test    # vitest run
 test -f packages/dsh-maestro-supervisor/lib/index.js
 test -f packages/dsh-maestro-supervisor/lib/client.js
 ```
@@ -137,7 +137,7 @@ The daemon uses `resumeViaRpc()` (`supervisor.ts:24`) which POSTs the same envel
 ```bash
 # Build & unit
 pnpm --dir packages/dsh-maestro-supervisor verify   # host + client
-pnpm --dir packages/dsh-maestro-supervisor test     # 82 tests
+pnpm --dir packages/dsh-maestro-supervisor test     # vitest run
 test -f packages/dsh-maestro-supervisor/lib/index.js
 test -f packages/dsh-maestro-supervisor/lib/client.js
 curl -s http://127.0.0.1:3080/plugins/@ddtcorex/dsh-maestro-supervisor/client.js | grep -c "window.location.reload"  # 2
