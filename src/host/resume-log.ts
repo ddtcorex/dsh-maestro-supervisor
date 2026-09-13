@@ -17,7 +17,8 @@ import { homedir } from 'node:os'
 export interface ResumeLogEntry {
   ts: number
   sessionId?: string
-  kind: 'scan' | 'resume-failed' | 'resumed' | 'no-agent'
+  /** `resume-retry`: a resume blocked by another owner's write handle, retried. */
+  kind: 'scan' | 'resume-failed' | 'resumed' | 'no-agent' | 'resume-retry'
   error?: string
   detail?: string
   scanned?: number

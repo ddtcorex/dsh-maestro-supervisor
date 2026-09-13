@@ -84,6 +84,86 @@ describe('resumeInterrupted', () => {
     expect(ctx._logs.some((l: string) => l.includes('sent recovery continue'))).toBe(true)
   })
 
+  it('retries a resume whose write handle is still held, then re-attaches', async () => {
+    // The reconnecting browser re-opens the interrupted session and holds its
+    // write handle while it loads/repairs it, so the boot scan's resume loses
+    // that race: `session "…" is already owned by an active write handle`.
+    // Observed 2026-09-13 — the same session accepted an agent seconds later.
+    const followup = vi.fn()
+    let calls = 0
+    const resumeAgent = vi.fn(async () => {
+      calls++
+      if (calls < 3) {
+        throw Object.assign(new Error('session "session-abc" is already owned by an active write handle'), { name: 'SessionAlreadyOwnedError' })
+      }
+      return { agent: { followup } }
+    })
+    const entries: any[] = []
+    const ctx = makeCtx({
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ([
+            { type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } },
+          ]),
+          close: async () => {},
+        }),
+      },
+      agents: { get: () => undefined, resume: resumeAgent },
+    })
+    await expect(
+      resumeInterrupted(ctx, ['proj/session-abc'], {
+        logResume: (e: any) => entries.push(e),
+        resumeOwnershipRetryDelaysMs: [0, 0],
+      }),
+    ).resolves.toEqual(['proj/session-abc'])
+    expect(resumeAgent).toHaveBeenCalledTimes(3)
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(entries.filter((e) => e.kind === 'resume-retry').length).toBe(2)
+  })
+
+  it('gives up after the bounded retries and reports the ownership failure once', async () => {
+    const resumeAgent = vi.fn(async () => {
+      throw Object.assign(new Error('session "session-abc" is already owned by an active write handle'), { name: 'SessionAlreadyOwnedError' })
+    })
+    const entries: any[] = []
+    const ctx = makeCtx({
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ([{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }]),
+          close: async () => {},
+        }),
+      },
+      agents: { get: () => undefined, resume: resumeAgent },
+    })
+    await expect(
+      resumeInterrupted(ctx, ['proj/session-abc'], {
+        logResume: (e: any) => entries.push(e),
+        resumeOwnershipRetryDelaysMs: [0, 0],
+      }),
+    ).resolves.toEqual([])
+    expect(resumeAgent).toHaveBeenCalledTimes(3) // initial + two bounded retries
+    const failed = entries.filter((e) => e.kind === 'resume-failed')
+    expect(failed.length).toBe(1)
+    expect(String(failed[0].error)).toContain('already owned')
+  })
+
+  it('does not retry a resume failure that is not an ownership conflict', async () => {
+    const resumeAgent = vi.fn(async () => {
+      throw new Error('provider exploded')
+    })
+    const ctx = makeCtx({
+      sessionPersistence: {
+        open: async () => ({
+          read: async () => ([{ type: 'request/context', data: { provider: 'example-provider', model: 'example-model' } }]),
+          close: async () => {},
+        }),
+      },
+      agents: { get: () => undefined, resume: resumeAgent },
+    })
+    await resumeInterrupted(ctx, ['proj/session-abc'], { resumeOwnershipRetryDelaysMs: [0, 0] })
+    expect(resumeAgent).toHaveBeenCalledTimes(1)
+  })
+
   it('skips resume when provider/model cannot be recovered (avoids {{model}} persona crash)', async () => {
     const resumeAgent = vi.fn(async () => ({ agent: { followup: vi.fn() } }))
     const ctx = makeCtx({
