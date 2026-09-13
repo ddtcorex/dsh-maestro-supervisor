@@ -302,6 +302,18 @@ export async function pollHealth(opts: PollHealthOpts = {}): Promise<HealthState
     if (booting && kind !== 'refused') {
       return { up: true, httpCode, bootPhase, logTail: logContent.slice(-5000) }
     }
+    // D5: inside the boot window a refused connection with a verifiably alive
+    // process is a boot symptom, not a crash — the listener may not be bound
+    // yet. Outside the window, or with a dead process, the verdict below is
+    // exactly the pre-D5 behaviour (degraded when the port still answers,
+    // down when it does not).
+    if (booting && kind === 'refused') {
+      let alive = false
+      try { alive = await psAliveFn() } catch { alive = false }
+      if (alive) {
+        return { up: true, httpCode, bootPhase, logTail: logContent.slice(-5000) }
+      }
+    }
     if (suppressed) {
       return { up: true, httpCode, bootPhase, logTail: logContent.slice(-5000) }
     }
