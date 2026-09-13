@@ -1,4 +1,4 @@
-import type { HealthState } from './health-poller.js'
+import { classifyFetchFailure, type HealthState } from './health-poller.js'
 import { runDebugAgent } from './debug-agent.js'
 import { findInterrupted as defaultFindInterrupted, parseDuration } from './resume.js'
 import * as fs from 'node:fs'
@@ -30,6 +30,10 @@ export interface SupervisorDeps {
   // next poll, which would otherwise re-trigger endlessly. Default 3 (at the
   // daemon's 3s interval, ~9s of continuous down before acting).
   downThreshold?: number
+  // Boot budget in ms (default 180_000). A boot younger than this that has not
+  // printed its own success marker is unproven: weak failures and degraded
+  // verdicts must not advance the counters (incident 2026-09-13).
+  bootGraceMs?: number
   getTime?: () => number
   // Checks the dsh-safe-web-update marker (see
   // docs/specs/2026-08-28-supervisor-planned-restart-design.md): a down poll
@@ -293,6 +297,15 @@ export class Supervisor {
     return 20000
   }
 
+  private async getEffectiveBootGraceMs(): Promise<number> {
+    if (this.deps.bootGraceMs !== undefined) return this.deps.bootGraceMs
+    try {
+      const cfg = await readSupervisorConfig()
+      if (typeof (cfg as any).bootGraceMs === 'number' && (cfg as any).bootGraceMs > 0) return (cfg as any).bootGraceMs
+    } catch {}
+    return 180_000
+  }
+
   private async findInterruptedRecent(withinMs?: number): Promise<{ scanned: number; interrupted: string[] }> {
     const ms = withinMs ?? this.getResumeWithinMs()
     // Prefer injected mock for testability
@@ -428,6 +441,14 @@ export class Supervisor {
     // DEGRADED: http 200 but log has plugin error → report + notify, rollback after consecutive threshold
     if (health.degraded) {
       this.consecutiveDown = 0
+      // D1: a degraded verdict while the current boot is unproven is a boot
+      // transient, not a plugin error — the incident's report line
+      // "rollback — degraded: This operation was aborted" was produced exactly
+      // here, five polls after a slow boot.
+      if (health.bootPhase === 'booting') {
+        this.consecutiveDegraded = 0
+        return
+      }
       // Check suppression first — don't count degraded during planned restart grace
       let suppressedByMarkerDeg = false
       try { suppressedByMarkerDeg = this.getCheckPlannedRestart()() } catch { suppressedByMarkerDeg = false }
@@ -569,6 +590,13 @@ export class Supervisor {
     // A lone timed-out poll (e.g. a slow plugin-tree boot) must not trigger
     // rollback/restart: that restart produces its own transient errors on
     // the next poll, which would otherwise re-trigger this same path forever.
+    // D1/D2: while the boot is unproven only a refused connection may advance
+    // the down counter — nothing is listening, so the process is gone. A
+    // timeout/abort (or anything unattributable) is a slow boot, not a crash.
+    if (health.bootPhase === 'booting' && classifyFetchFailure(health.error) !== 'refused') {
+      this.consecutiveDown = 0
+      return
+    }
     this.consecutiveDown++
     let downThreshold = await this.getEffectiveDownThreshold()
     // When a planned restart marker is active, double the threshold (3→6 at

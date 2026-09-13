@@ -472,3 +472,67 @@ describe('caller restart-request handling', () => {
     vi.useRealTimers()
   })
 })
+
+describe('boot-settled counter gate', () => {
+  function makeSupervisor(over: Record<string, unknown>) {
+    return new Supervisor({
+      writeLKG: vi.fn(async () => ({ ts: '', manifest: { ts: '', files: [] } as any })),
+      writeFailed: vi.fn(async () => ({ ts: 'failed-ts', manifest: { ts: '', files: [] } as any })),
+      writeReport: vi.fn(async () => '/tmp/report.md'),
+      rollback: vi.fn(async () => {}),
+      notify: vi.fn(async () => {}),
+      intervalMs: 10,
+      // Hermetic: never read the operator's real planned-restart marker.
+      checkPlannedRestart: () => false,
+      ...over,
+    } as any)
+  }
+
+  it('never advances the degraded counter while the boot is unproven', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: true, httpCode: 200, error: 'This operation was aborted', degraded: true, bootPhase: 'booting' }),
+    })
+    for (let i = 0; i < 8; i++) await s.tick()
+    expect((s as any).consecutiveDegraded).toBe(0)
+    expect((s as any).deps.writeReport).not.toHaveBeenCalled()
+    expect((s as any).deps.rollback).not.toHaveBeenCalled()
+  })
+
+  it('never advances the down counter on a weak failure while the boot is unproven', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: false, error: 'This operation was aborted', bootPhase: 'booting' }),
+      downThreshold: 1,
+    })
+    await s.tick()
+    await s.tick()
+    expect((s as any).consecutiveDown).toBe(0)
+    expect((s as any).deps.rollback).not.toHaveBeenCalled()
+  })
+
+  it('advances the down counter for a refused connection even while the boot is unproven', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: false, error: 'connect ECONNREFUSED 127.0.0.1:3082', bootPhase: 'booting' }),
+      downThreshold: 3,
+    })
+    await s.tick()
+    await s.tick()
+    expect((s as any).consecutiveDown).toBe(2)
+  })
+
+  it('rolls back once the boot has settled and the threshold is reached', async () => {
+    const s = makeSupervisor({
+      pollHealth: async () => ({ up: false, error: 'This operation was aborted', bootPhase: 'settled' }),
+      downThreshold: 3,
+    })
+    await s.tick()
+    await s.tick()
+    expect((s as any).deps.rollback).not.toHaveBeenCalled()
+    await s.tick()
+    expect((s as any).deps.rollback).toHaveBeenCalledTimes(1)
+  })
+
+  it('takes the boot grace from deps when injected', async () => {
+    const s = makeSupervisor({ pollHealth: async () => ({ up: true }), bootGraceMs: 90_000 })
+    await expect((s as any).getEffectiveBootGraceMs()).resolves.toBe(90_000)
+  })
+})
