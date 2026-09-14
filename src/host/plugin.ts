@@ -106,7 +106,7 @@ function getAutoResumeEnabled(config?: SupervisorPluginConfig): boolean {
         if (['0','false','no','off'].includes(v)) return false
       }
     }
-    const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+    const maestroPath = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'dsh-maestro-config', 'settings.json')
     if (fs.existsSync(maestroPath)) {
       const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
       const raw = j?.domains?.supervisor?.autoResumeEnabled ?? j?.supervisor?.autoResumeEnabled
@@ -126,7 +126,7 @@ function getAutoResumeEnabled(config?: SupervisorPluginConfig): boolean {
  * getAutoResumeEnabled: (1) the Cordis-supplied plugin config (cordis.patch.yml
  * `config:` block / whatever apply() receives — highest precedence), (2) env
  * DSH_SUPERVISOR_RESUME_CORE_TOOL_POLICY, (3) ~/.dsh/.supervisor/config.json,
- * (4) ~/.dsh/maestro/settings.json (domains.supervisor.resumeCoreToolPolicy),
+ * (4) ~/.dsh/dsh-maestro-config/settings.json (domains.supervisor.resumeCoreToolPolicy),
  * (5) 'warn'. Any other value falls through to the default 'warn'.
  */
 function getResumeCoreToolPolicy(config?: SupervisorPluginConfig): ResumeCoreToolPolicy {
@@ -145,7 +145,7 @@ function getResumeCoreToolPolicy(config?: SupervisorPluginConfig): ResumeCoreToo
       const raw = (cfg as any).resumeCoreToolPolicy
       if (raw === 'warn' || raw === 'park') return raw
     }
-    const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+    const maestroPath = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'dsh-maestro-config', 'settings.json')
     if (fs.existsSync(maestroPath)) {
       const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
       const raw = j?.domains?.supervisor?.resumeCoreToolPolicy ?? j?.supervisor?.resumeCoreToolPolicy
@@ -161,7 +161,7 @@ function getResumeCoreToolPolicy(config?: SupervisorPluginConfig): ResumeCoreToo
  * Same precedence chain as `getResumeCoreToolPolicy`: (1) the Cordis-supplied
  * plugin config, (2) env `DSH_SUPERVISOR_RESUME_AUTO_REPAIR`, (3)
  * `~/.dsh/.supervisor/config.json`, (4)
- * `~/.dsh/maestro/settings.json` (`domains.supervisor.resumeAutoRepair`),
+ * `~/.dsh/dsh-maestro-config/settings.json` (`domains.supervisor.resumeAutoRepair`),
  * (5) `true`. Repair mutates a live agent's tool surface, so operators get a
  * kill switch; the loss itself is still reported when it is off.
  * @param config - the Cordis config handed to `apply()`.
@@ -186,7 +186,7 @@ function getResumeAutoRepair(config?: SupervisorPluginConfig): boolean {
       const fromFile = parse((JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as any).resumeAutoRepair)
       if (fromFile !== undefined) return fromFile
     }
-    const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+    const maestroPath = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'dsh-maestro-config', 'settings.json')
     if (fs.existsSync(maestroPath)) {
       const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
       const fromSettings = parse(j?.domains?.supervisor?.resumeAutoRepair ?? j?.supervisor?.resumeAutoRepair)
@@ -224,7 +224,7 @@ function getResumeWithinMs(config?: SupervisorPluginConfig): number {
         if (v !== undefined) return v
       } else if (typeof raw === 'number') return raw * 60 * 1000
     }
-    const maestroPath = path.join(os.homedir(), '.dsh/maestro/settings.json')
+    const maestroPath = path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'dsh-maestro-config', 'settings.json')
     if (fs.existsSync(maestroPath)) {
       const j = JSON.parse(fs.readFileSync(maestroPath, 'utf-8'))
       const raw = j?.domains?.supervisor?.autoResumeWithin ?? j?.supervisor?.autoResumeWithin
@@ -236,6 +236,19 @@ function getResumeWithinMs(config?: SupervisorPluginConfig): number {
     }
   } catch {}
   return 5 * 60 * 1000
+}
+
+/**
+ * Whether `autoResumeEnabled` is pinned by an install-supplied Cordis `config:` value.
+ * Used by `dsh-maestro-config`'s UI to render a locked/disabled state instead of
+ * an interactive toggle that has no effect.
+ */
+export function isAutoResumePinned(config?: SupervisorPluginConfig): boolean {
+  return typeof config?.autoResumeEnabled === 'boolean'
+}
+
+export function getAutoResumeEnabledExported(config?: SupervisorPluginConfig): boolean {
+  return getAutoResumeEnabled(config)
 }
 
 export async function runAutoResume(
@@ -792,6 +805,9 @@ export function createResumeRpcHandler(
         ? (payload as any).withinMs
         : getResumeWithinMs(opts.config)
       return { ok: true, value: await defaultFindInterrupted(undefined, { withinMs }) }
+    }
+    if (endpoint === 'status') {
+      return { ok: true, value: { autoResumeEnabled: getAutoResumeEnabled(opts.config), autoResumePinned: isAutoResumePinned(opts.config), autoResumeWithinMs: getResumeWithinMs(opts.config) } }
     }
     if (endpoint !== 'resume') {
       return { ok: false, error: { code: 'bad-request', message: `unsupported endpoint: ${endpoint}` } }

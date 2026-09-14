@@ -8,4 +8,3 @@
       name: '@ddtcorex/dsh-maestro-supervisor'
       config:
         autoResumeWithin: 5
-        autoResumeEnabled: true
