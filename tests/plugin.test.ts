@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, createSessionHealthRpcHandler, inject, snapshotResumeToolHealth } from '../src/host/plugin.js'
+import { resumeInterrupted, runAutoResume, apply, createResumeRpcHandler, createSessionHealthRpcHandler, inject, snapshotResumeToolHealth, isAutoResumePinned } from '../src/host/plugin.js'
 
 function makeCtx(overrides: Record<string, any> = {}) {
   const logs: string[] = []
@@ -768,6 +768,39 @@ describe('apply', () => {
       .resolves.toEqual({ ok: true, value: { resumed: ['proj/session-a'] } })
     // The handler forwards a deps object (empty here — no config/seams passed).
     expect(resume).toHaveBeenCalledWith(ctx, ['proj/session-a'], {})
+  })
+
+  // The `status` endpoint exists so dsh-maestro-config can render an honest
+  // auto-resume toggle: writing the settings store is pointless when an
+  // install-supplied Cordis `config:` block outranks it, and the UI must be
+  // able to tell the difference.
+  describe('status endpoint (auto-resume effective state)', () => {
+    it('reports the effective value and the pinned flag when config sets it', async () => {
+      const ctx = makeCtx()
+      const handler = createResumeRpcHandler(ctx, { config: { autoResumeEnabled: true, autoResumeWithin: 7 } })
+      const res: any = await handler('status', {}, new AbortController().signal)
+      expect(res.ok).toBe(true)
+      expect(res.value).toMatchObject({ autoResumeEnabled: true, autoResumePinned: true })
+      expect(res.value.autoResumeWithinMs).toBe(7 * 60 * 1000)
+    })
+
+    it('reports autoResumePinned false when no Cordis config supplies the key (the settings store is authoritative)', async () => {
+      const ctx = makeCtx()
+      const handler = createResumeRpcHandler(ctx, { config: {} })
+      const res: any = await handler('status', {}, new AbortController().signal)
+      expect(res.ok).toBe(true)
+      expect(res.value.autoResumePinned).toBe(false)
+      // getAutoResumeEnabled()'s documented default when nothing overrides it.
+      expect(res.value.autoResumeEnabled).toBe(true)
+    })
+
+    it('isPinned tracks the type, not the truthiness — an explicit false still pins', () => {
+      // `autoResumeEnabled: false` in a Cordis config must lock the UI toggle
+      // too: the store write would be shadowed exactly the same way.
+      expect(isAutoResumePinned({ autoResumeEnabled: false })).toBe(true)
+      expect(isAutoResumePinned({})).toBe(false)
+      expect(isAutoResumePinned(undefined)).toBe(false)
+    })
   })
 
   it('registers each RPC handler exactly once on host-valid channel names', () => {
